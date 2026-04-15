@@ -281,7 +281,7 @@ Generic error
   "status": "error",
   "message": "<error description>"
 }
-```json
+```
 
 What to Download
 Download the project starter package HERE Download HERE.
