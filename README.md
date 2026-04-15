@@ -187,7 +187,7 @@ So the protocol is application-layer JSON messaging, not HTTP. You are not permi
 Request Structure
 Every request is a JSON object with at least an action field.
 
-```
+```json
 CREATE request
 {
   "action": "CREATE",
@@ -224,7 +224,7 @@ LOGOUT request
   "token": "<session_token>"
 }
 
-```json
+```
 
 Response Structure
 Every response is also a JSON object. At minimum, responses include:
@@ -233,7 +233,7 @@ Every response is also a JSON object. At minimum, responses include:
 "status": "error" on failure
 Most error responses also include a message field.
 
-```
+```json
 CREATE success
 {
   "status": "ok",
