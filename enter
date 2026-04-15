@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+#
+# enter
+#
+# Usage:
+#   sudo ./enter client
+#   sudo ./enter server
+#   sudo ./enter mitm
+#
+# Enters:
+#   - the requested network namespace
+#   - a private mount namespace
+#   - a chroot rooted at the corresponding *_root directory
+#
+# Host system directories are bind-mounted read-only so that the full
+# host Python installation and standard Linux utilities can be used 
+# without modifying the host system by mistake. Nonetheless, always create
+# a Python venv and install packages within it.
+#
+
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: sudo ./enter [client|server|mitm]"
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+case "$1" in
+    client)
+        NS="ns_client"
+        LABEL="client"
+        COLOR='\[\e[1;32m\]'
+        ROOTFS="${SCRIPT_DIR}/client_root"
+        HOME_IN_CHROOT="/home/client"
+        ;;
+    server)
+        NS="ns_server"
+        LABEL="server"
+        COLOR='\[\e[1;36m\]'
+        ROOTFS="${SCRIPT_DIR}/server_root"
+        HOME_IN_CHROOT="/home/server"
+        ;;
+    mitm)
+        NS="ns_mitm"
+        LABEL="mitm"
+        COLOR='\[\e[1;31m\]'
+        ROOTFS="${SCRIPT_DIR}/mitm_root"
+        HOME_IN_CHROOT="/home/mitm"
+        ;;
+    *)
+        echo "Usage: sudo ./enter [client|server|mitm]"
+        exit 1
+        ;;
+esac
+
+if ! ip netns list | awk '{print $1}' | grep -qx "$NS"; then
+    echo "Namespace '$NS' does not exist."
+    echo "Run: sudo ./setup_net.sh"
+    exit 1
+fi
+
+mkdir -p "$ROOTFS"
+mkdir -p "${ROOTFS}${HOME_IN_CHROOT}"
+
+
+exec ip netns exec "$NS" unshare --mount --fork bash -c '
+set -euo pipefail
+
+ROOTFS="$1"
+LABEL="$2"
+COLOR="$3"
+HOME_IN_CHROOT="$4"
+
+mount --make-rprivate /
+
+mkdir -p "$ROOTFS"/{bin,sbin,usr,lib,lib64,etc,opt,dev,proc,sys,tmp,run,var,home}
+mkdir -p "$ROOTFS$HOME_IN_CHROOT"
+
+bind_ro_if_exists() {
+    local src="$1"
+    local dst="$ROOTFS$1"
+
+    if [[ -e "$src" ]]; then
+        mkdir -p "$dst"
+        mount --rbind "$src" "$dst"
+        mount --make-rslave "$dst"
+        mount -o remount,bind,ro "$dst" 2>/dev/null || true
+    fi
+}
+
+# Host system available read-only inside the chroot
+bind_ro_if_exists /bin
+bind_ro_if_exists /sbin
+bind_ro_if_exists /usr
+bind_ro_if_exists /lib
+bind_ro_if_exists /lib64
+bind_ro_if_exists /etc
+bind_ro_if_exists /opt
+bind_ro_if_exists /dev
+bind_ro_if_exists /proc
+bind_ro_if_exists /sys
+bind_ro_if_exists /run
+bind_ro_if_exists /var
+bind_ro_if_exists /tmp
+
+# Writable role-specific home
+mkdir -p "$ROOTFS$HOME_IN_CHROOT"
+
+chroot "$ROOTFS" /bin/bash --noprofile --norc -c "
+export HOME=\"$HOME_IN_CHROOT\"
+cd \"$HOME_IN_CHROOT\"
+export PS1=\"${COLOR}root@${LABEL}\[\e[0m\]:\w# \"
+exec /bin/bash --noprofile --norc -i
+"
+' _ "$ROOTFS" "$LABEL" "$COLOR" "$HOME_IN_CHROOT"

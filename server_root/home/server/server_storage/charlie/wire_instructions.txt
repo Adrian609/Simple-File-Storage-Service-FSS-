@@ -1,0 +1,16 @@
+International Wire Transfer Instructions
+Contractor: Lattice Analytics Ltd.
+Country: Singapore
+
+Beneficiary Name: Lattice Analytics Ltd.
+Bank Name: United Overseas Bank
+SWIFT/BIC: UOVBSGSG
+Account Number: 4472319085
+Invoice Number: INV-2025-114
+Amount Due: USD 48,250
+Payment Deadline: December 12, 2025
+
+Notes:
+Final milestone payment for data annotation contract.
+Send confirmation to accounts@lattice-analytics.com after transfer.
+Do not delay beyond deadline to avoid penalty clause.

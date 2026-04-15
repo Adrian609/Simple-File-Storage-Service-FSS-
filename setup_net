@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+#
+# setup_net.sh
+#
+# Transparent MITM setup
+#
+# Topology:
+#   ns_client <-> ns_mitm <-> ns_server
+#
+# Addresses:
+#   ns_client : 10.0.7.2/24
+#   ns_mitm   : 10.0.7.1/24  (toward client)
+#             : 10.0.8.1/24  (toward server)
+#   ns_server : 10.0.8.2/24
+#
+# Service:
+#   real server listens on 10.0.8.2:9001
+#
+# MITM:
+#   transparent listener on local port 15000 inside ns_mitm
+#
+# Run:
+#   sudo ./setup_net.sh
+#
+
+set -euo pipefail
+
+NS_CLIENT="ns_client"
+NS_MITM="ns_mitm"
+NS_SERVER="ns_server"
+
+VETH_C="veth_c"
+VETH_M1="veth_m1"
+VETH_S="veth_s"
+VETH_M2="veth_m2"
+
+CLIENT_IP_CIDR="10.0.7.2/24"
+MITM_CLIENT_IP_CIDR="10.0.7.1/24"
+SERVER_IP_CIDR="10.0.8.2/24"
+MITM_SERVER_IP_CIDR="10.0.8.1/24"
+
+CLIENT_NET="10.0.7.0/24"
+SERVER_NET="10.0.8.0/24"
+
+MITM_CLIENT_IP="10.0.7.1"
+MITM_SERVER_IP="10.0.8.1"
+
+SERVER_IP="10.0.8.2"
+SERVER_PORT="9001"
+MITM_PORT="15000"
+
+TPROXY_MARK="1"
+TPROXY_TABLE="100"
+
+log() {
+    echo "[setup_net] $*"
+}
+
+delete_ns_if_exists() {
+    local ns="$1"
+    if ip netns list | awk '{print $1}' | grep -qx "$ns"; then
+        log "Deleting existing namespace: $ns"
+        ip netns del "$ns"
+    fi
+}
+
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "Run as root: sudo ./setup_net.sh" >&2
+    exit 1
+fi
+
+command -v ip >/dev/null 2>&1 || { echo "Missing: ip"; exit 1; }
+command -v nft >/dev/null 2>&1 || { echo "Missing: nft"; exit 1; }
+
+log "Cleaning up previous run"
+delete_ns_if_exists "$NS_CLIENT"
+delete_ns_if_exists "$NS_MITM"
+delete_ns_if_exists "$NS_SERVER"
+
+log "Creating namespaces"
+ip netns add "$NS_CLIENT"
+ip netns add "$NS_MITM"
+ip netns add "$NS_SERVER"
+
+log "Creating veth pairs"
+ip link add "$VETH_C" type veth peer name "$VETH_M1"
+ip link add "$VETH_S" type veth peer name "$VETH_M2"
+
+log "Moving interfaces into namespaces"
+ip link set "$VETH_C" netns "$NS_CLIENT"
+ip link set "$VETH_M1" netns "$NS_MITM"
+ip link set "$VETH_S" netns "$NS_SERVER"
+ip link set "$VETH_M2" netns "$NS_MITM"
+
+log "Assigning IPs"
+ip netns exec "$NS_CLIENT" ip addr add "$CLIENT_IP_CIDR" dev "$VETH_C"
+ip netns exec "$NS_MITM"  ip addr add "$MITM_CLIENT_IP_CIDR" dev "$VETH_M1"
+
+ip netns exec "$NS_SERVER" ip addr add "$SERVER_IP_CIDR" dev "$VETH_S"
+ip netns exec "$NS_MITM"  ip addr add "$MITM_SERVER_IP_CIDR" dev "$VETH_M2"
+
+log "Bringing interfaces up"
+ip netns exec "$NS_CLIENT" ip link set lo up
+ip netns exec "$NS_CLIENT" ip link set "$VETH_C" up
+
+ip netns exec "$NS_MITM" ip link set lo up
+ip netns exec "$NS_MITM" ip link set "$VETH_M1" up
+ip netns exec "$NS_MITM" ip link set "$VETH_M2" up
+
+ip netns exec "$NS_SERVER" ip link set lo up
+ip netns exec "$NS_SERVER" ip link set "$VETH_S" up
+
+log "Adding routes"
+ip netns exec "$NS_CLIENT" ip route add "$SERVER_NET" via "$MITM_CLIENT_IP"
+ip netns exec "$NS_SERVER" ip route add "$CLIENT_NET" via "$MITM_SERVER_IP"
+
+log "Enabling forwarding in ns_mitm"
+ip netns exec "$NS_MITM" sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+log "Clearing any old nftables config in ns_mitm"
+ip netns exec "$NS_MITM" sh -c "nft delete table ip tproxy_lab 2>/dev/null || true"
+
+log "Installing nftables TPROXY rules in ns_mitm"
+ip netns exec "$NS_MITM" nft -f - <<EOF
+table ip tproxy_lab {
+    chain prerouting {
+        type filter hook prerouting priority -150; policy accept;
+
+        # Packets that already belong to a transparent local socket
+        meta l4proto tcp socket transparent 1 meta mark set ${TPROXY_MARK} accept
+
+        # New client traffic to the real server
+        ip daddr ${SERVER_IP} tcp dport ${SERVER_PORT} tproxy to :${MITM_PORT} meta mark set ${TPROXY_MARK} accept
+    }
+}
+EOF
+
+log "Installing policy routing in ns_mitm"
+ip netns exec "$NS_MITM" sh -c "ip rule del fwmark ${TPROXY_MARK} lookup ${TPROXY_TABLE} 2>/dev/null || true"
+ip netns exec "$NS_MITM" sh -c "ip route flush table ${TPROXY_TABLE} 2>/dev/null || true"
+ip netns exec "$NS_MITM" ip rule add fwmark "$TPROXY_MARK" lookup "$TPROXY_TABLE"
+ip netns exec "$NS_MITM" ip route add local 0.0.0.0/0 dev lo table "$TPROXY_TABLE"
+
+log "Done"
+
