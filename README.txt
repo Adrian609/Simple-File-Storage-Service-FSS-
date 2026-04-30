@@ -1,1 +1,0 @@
-Details on the project are available in Canvas.
