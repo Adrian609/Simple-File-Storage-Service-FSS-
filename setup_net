@@ -1,6 +1,10 @@
 #!/bin/bash
 # Sets up three network namespaces for FSS project testing:
-# ns_client, ns_mitm, ns_server
+# ns_client, ns_mitm, ns_server.
+#
+# The submitted system does not require any trusted code to run in ns_mitm.
+# The middle namespace only forwards packets so an evaluator can observe or
+# attack traffic from the network path without changing the client/server code.
 
 set -e
 
@@ -43,14 +47,10 @@ ip netns exec ns_mitm sysctl -w net.ipv4.conf.all.route_localnet=1 > /dev/null
 ip netns exec ns_server ip addr add 10.0.8.2/24 dev veth_sm
 ip netns exec ns_server ip link set veth_sm up
 ip netns exec ns_server ip link set lo up
-
-# Redirect traffic through MITM using iptables
-ip netns exec ns_mitm iptables -t mangle -A PREROUTING -p tcp --dport 9001 -j TPROXY \
-    --tproxy-mark 1 --on-port 15000
-ip netns exec ns_mitm ip rule add fwmark 1 lookup 100
-ip netns exec ns_mitm ip route add local 0.0.0.0/0 dev lo table 100
+ip netns exec ns_server ip route add default via 10.0.8.1
 
 echo "[setup_net] network namespaces ready"
 echo "  ns_client: 10.0.1.2"
 echo "  ns_mitm:   10.0.1.1 / 10.0.8.1"
 echo "  ns_server: 10.0.8.2"
+echo "  ns_mitm is a router only; no MITM program is required by the system"

@@ -15,10 +15,15 @@ echo "Generating server certificate signing request..."
 openssl req -new -key server_key.pem -out server.csr \
   -subj "/C=US/ST=Colorado/L=Denver/O=FSS-Server/CN=10.0.8.2"
 
+cat > server_ext.cnf <<EOF
+subjectAltName = IP:10.0.8.2
+EOF
+
 echo "Signing server certificate with CA..."
 openssl x509 -req -days 365 -in server.csr \
   -CA ca_cert.pem -CAkey ca_key.pem \
-  -CAcreateserial -out server_cert.pem
+  -CAcreateserial -out server_cert.pem \
+  -extfile server_ext.cnf
 
 echo "Verifying..."
 openssl verify -CAfile ca_cert.pem server_cert.pem

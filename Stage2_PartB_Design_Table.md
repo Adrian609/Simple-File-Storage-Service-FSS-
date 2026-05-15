@@ -1,28 +1,57 @@
-# Stage 2 Part B Design Table
+# Stage 2 Part B Final Design
 
-This Markdown version was generated from `Stage2_PartB_Design_Table.xlsx` for inclusion in the repository.
+## Overview
 
-## Final Design
+The final implementation is a client/server secure file storage service. The
+MITM machine is not trusted and is not required to run any code for the system
+to function. Traffic may pass through the MITM network path, but confidentiality,
+integrity, freshness, and server authenticity are enforced by the client and
+server themselves.
+
+Major changes from the initial design are:
+
+- The submitted runtime starts only the server and client. The MITM namespace is
+  a router for testing, not a required system component.
+- Responses now always echo the request `req_id`, and the client rejects missing
+  or mismatched response IDs.
+- The server now validates malformed request metadata more strictly, uses
+  socket timeouts, avoids leaking raw exception text to clients, and protects
+  shared user/session state with locks.
+
+## Request/Response Structure Changes
+
+After the initial handshake, every request and response is AES-GCM encrypted and
+base64 encoded.
+
+Every encrypted request includes:
+
+- `nonce`: a unique UUID for replay detection.
+- `ts`: a Unix timestamp used to reject stale requests.
+- `req_id`: a UUID identifying the request.
+
+Every encrypted response includes:
+
+- `req_id`: the same request ID from the request.
+- `status`: `ok` or `error`.
+- action-specific fields such as `token`, `files`, `content`, `sha256`, or
+  `message`.
+
+The client treats a missing or mismatched response `req_id` as a security error.
+
+## Final Design Table
 
 | Implemented Action / Change | Requirement(s) Addressed | Explanation |
 | --- | --- | --- |
-| Added an ECDH key exchange at the start of every session using X25519. Both sides generate a keypair, exchange public keys, and derive a shared AES-256 session key via HKDF. All messages from that point are AES-GCM encrypted and base64 encoded. | R1, R2, R5, R12 | In the baseline, all traffic was plaintext and visible to anyone on the network path. With AES-GCM encryption, the MITM can only see ciphertext. File contents cannot be read or changed in transit. Trust is established through the key exchange rather than assumed. Addresses R1 (confidentiality of file contents), R5 (integrity of operations), and R12 (trust explicitly established). |
-| The server now presents an X.509 certificate signed by our own CA during the handshake. The client loads ca_cert.pem and verifies the server certificate before accepting any key material. The server also signs its ECDH public key with the certificate private key so the client can verify it came from the real server. | R6, R12 | Without server authentication, the MITM could impersonate the server and the client had no way to detect it. With certificate verification, the client will only proceed if the server can prove its identity via a certificate signed by the trusted CA. A MITM cannot forge this. Addresses R6 (client only accepts genuine server responses) and R12 (trust explicitly established). |
-| Passwords are now hashed using bcrypt with a randomly generated salt before being stored in users.json. Login verification uses bcrypt.checkpw() instead of a direct string comparison. | R1, R12 | The baseline stored passwords as plaintext, meaning anyone who could read users.json had immediate access to all accounts. bcrypt hashing means the stored values cannot be reversed to recover original passwords. The salt prevents precomputed attacks. Addresses R1 (credential confidentiality) and R12 (secure credential management). |
-| Every request now includes a nonce (unique UUID) and a Unix timestamp. The server checks the nonce against a set of previously seen nonces and rejects requests with timestamps more than 60 seconds outside the current time. | R4, R8 | Without this, any captured request could be replayed at any time and the server would process it as legitimate. Adding a nonce that is rejected after first use, combined with a timestamp check, means each request can only be accepted once and within a limited time window. Addresses R4 (completed operation must come from a current request) and R8 (session information not reusable outside its intended session). |
-| The session token is now explicitly removed from the SESSIONS dictionary when a user logs out, using del SESSIONS[token]. | R8 | In the baseline, logout sent a success response but never actually removed the token. An attacker who captured the token during a session could continue using it after the user logged out. Deleting the token on logout ensures it becomes invalid immediately. Addresses R8 (session information usable only within the intended session). |
-| Filename inputs for upload and download are now validated using os.path.realpath() to resolve the true absolute path. The resolved path is checked to confirm it stays within the authenticated user's storage directory. | R7, R9 | The baseline used os.path.join without any validation, allowing filenames like ../../bob/letter.txt to navigate outside the user's directory. os.path.realpath resolves all ../ sequences before the check happens, so path traversal cannot bypass it. Addresses R7 (users cannot access others' files) and R9 (malformed input does not cause unsafe behavior). |
-| The recv_line function on both client and server now tracks the total size of incoming data and drops the connection if it exceeds 10MB. | R9 | The baseline recv_line had no size limit and would keep reading indefinitely, making it possible to exhaust server memory with a single large message. The 10MB cap prevents this. Addresses R9 (malformed or unexpected input does not cause unsafe behavior). |
-| AUTH and CREATE requests are now tracked per client IP address using a sliding time window. If more than 10 requests arrive from the same IP within 60 seconds, further requests are rejected until the window expires. | R10 | Without rate limiting, an attacker could spam CREATE to fill disk and users.json, or brute force AUTH with no penalty. Rate limiting at the IP level makes both attacks impractical while legitimate users stay well under the threshold. Addresses R10 (ordinary misuse should not trivially prevent legitimate use). |
-| Security-relevant events are now written to a log file (server_security.log) using Python's logging module, with timestamps. Logged events include authentication attempts, file operations, rate limit violations, path traversal attempts, and errors. | R11 | The baseline only printed to stdout, meaning all evidence was lost when the server restarted. Writing to a file with timestamps means events are preserved across restarts and can be reviewed after an incident. Addresses R11 (sufficient evidence of events and failures for later review). |
-| Every request now includes a req_id field (unique UUID). This is echoed in server responses, allowing the client to confirm that each response corresponds to the request it sent. | R3, R6 | Without request IDs, the client had no way to verify a response actually corresponded to its pending request. Adding req_id allows the client to detect injected or mismatched responses. Combined with encryption, this strengthens R3 (clear and consistent outcome per request) and R6 (client accepts only genuine responses). |
-| Usernames submitted in CREATE requests are now checked against a list of banned characters including path separators, null bytes, and other characters that could cause issues in filesystem operations. | R9 | The username is used directly in directory creation and path construction on the server. Allowing special characters in usernames could be used to manipulate file paths or cause unexpected behavior. Validation at account creation blocks these attempts before they reach the filesystem. Addresses R9 (unexpected input does not cause unsafe behavior). |
-
----
-
-## Review Checklist
-
-- [ ] Confirm each implemented action maps to the cited requirement numbers.
-- [ ] Confirm the implementation actually includes each design change listed above.
-- [ ] Confirm test evidence exists for authentication, encryption, replay protection, path validation, logging, and rate limiting.
-- [ ] Confirm the final Stage 2 submission includes this design table or links to this Markdown file.
+| Added an authenticated ECDH handshake at the start of each session. The client and server exchange X25519 public keys, derive a shared AES-256 key with HKDF, and encrypt all later messages with AES-GCM. | R1, R2, R5, R12 | Baseline traffic was plaintext. The final design prevents a network attacker from reading or modifying file contents, credentials, tokens, or commands after the handshake. AES-GCM also detects tampering. |
+| The server presents an X.509 certificate signed by the project CA. The client verifies the CA signature, certificate validity period, and expected server identity. The server also signs its ECDH public key with the certificate private key. | R6, R12 | This prevents a MITM from impersonating the server during key exchange. The client only accepts key material that is tied to the genuine server certificate. |
+| The system no longer requires any trusted program to run on the MITM machine. The middle namespace created by `setup_net` only routes packets. | R12 | Trust is established between the client and server, not by assuming the network path is cooperative. This matches the Stage 2 Part B rule that the MITM is not under our control. |
+| Passwords are stored in `users.json` as bcrypt hashes with salts, and login uses `bcrypt.checkpw()`. | R1, R12 | Reading the user database no longer reveals plaintext passwords. |
+| Every request carries a nonce and timestamp. The server rejects missing, malformed, stale, or previously seen nonces. | R4, R8, R9 | Captured requests cannot be replayed later or submitted twice within a session. Malformed metadata is rejected before command execution. |
+| Every encrypted response echoes the request `req_id`, and the client rejects responses whose `req_id` is missing or different. | R3, R6 | The client can detect injected, replayed, or out-of-order responses that do not correspond to the current request. |
+| Session tokens are removed from the server's session table on logout. Session access is protected with a lock. | R8, R10 | Tokens stop working immediately after logout, and concurrent clients cannot corrupt the session table. |
+| Upload and download filenames are validated and resolved with `os.path.realpath()`. Empty names, path separators, null bytes, directory targets, and traversal attempts are rejected. | R7, R9 | Authenticated users can only access files inside their own storage directory. |
+| Usernames in CREATE requests are restricted to letters, digits, dot, underscore, and hyphen, with length limits. | R9 | Account names cannot be used to manipulate filesystem paths or create unsafe directories. |
+| Incoming messages are capped at 10 MB, and accepted sockets use timeouts. | R9, R10 | Oversized messages and slow or incomplete network reads cannot consume unbounded memory or hold server resources forever. |
+| AUTH and CREATE are rate limited per source IP address. | R10 | Brute-force login attempts and account-creation spam are limited without blocking normal use. |
+| Security-relevant events are logged to `server_security.log` with timestamps. | R11 | Authentication failures, replays, invalid paths, malformed requests, rate limits, file operations, and errors are available for later review. |
+| Shared mutable state for users and sessions is protected with thread locks. | R10 | Concurrent clients cannot race account creation, session insertion, or logout in a way that corrupts server state. |
