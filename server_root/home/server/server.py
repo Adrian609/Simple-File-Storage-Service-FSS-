@@ -78,8 +78,8 @@ log = logging.getLogger("fss_server")
 try:
     with open("users.json", "r") as f:
         USERS = json.load(f)
-except Exception as e:
-    log.error(f"[SERVER] error reading user file: {e}")
+except Exception:
+    log.exception("[SERVER] error reading user file")
     sys.exit(1)
 
 if not os.path.isdir(STORAGE_DIR):
@@ -92,8 +92,8 @@ try:
         SERVER_CERT_PEM = f.read()
     with open(KEY_PATH, "rb") as f:
         SERVER_PRIVATE_KEY = load_pem_private_key(f.read(), password=None)
-except Exception as e:
-    log.error(f"[SERVER] error loading certificate: {e}")
+except Exception:
+    log.exception("[SERVER] error loading certificate")
     sys.exit(1)
 
 
@@ -239,8 +239,8 @@ def perform_handshake(conn):
         log.info("[SERVER] handshake complete, encrypted session established")
         return session_key
 
-    except Exception as e:
-        log.error(f"[SERVER] handshake error: {e}")
+    except Exception:
+        log.exception("[SERVER] handshake error")
         return None
 
 
@@ -421,8 +421,8 @@ def handle_create(conn, key, req, client_ip):
 
             with open("users.json", "w", encoding="utf-8") as f:
                 json.dump(USERS, f, indent=4)
-        except Exception as e:
-            log.error(f"[SERVER] account creation failed for {username}: {e}")
+        except Exception:
+            log.exception(f"[SERVER] account creation failed for {username}")
             send_json(conn, key, make_response(req, "error", message="account creation failed"))
             return
 
@@ -494,8 +494,8 @@ def handle_list(conn, key, req):
             })
         log.info(f"[SERVER] list by {username}")
         send_json(conn, key, make_response(req, "ok", files=files))
-    except Exception as e:
-        log.error(f"[SERVER] list failed for {username}: {e}")
+    except Exception:
+        log.exception(f"[SERVER] list failed for {username}")
         send_json(conn, key, make_response(req, "error", message="list failed"))
 
 
@@ -530,8 +530,8 @@ def handle_upload(conn, key, req):
                                            message=f"upload complete for {username}",
                                            ts=ts,
                                            sha256=sha256_digest))
-    except Exception as e:
-        log.error(f"[SERVER] upload failed for {username}: {e}")
+    except Exception:
+        log.exception(f"[SERVER] upload failed for {username}")
         send_json(conn, key, make_response(req, "error", message="upload failed"))
 
 
@@ -561,8 +561,8 @@ def handle_download(conn, key, req):
                                            content=content,
                                            modified_ts=modified_ts,
                                            sha256=sha256_digest))
-    except Exception as e:
-        log.error(f"[SERVER] download failed for {username}: {e}")
+    except Exception:
+        log.exception(f"[SERVER] download failed for {username}")
         send_json(conn, key, make_response(req, "error", message="download failed"))
 
 
@@ -654,8 +654,8 @@ def handle_client(conn, addr):
 
     except socket.timeout:
         log.warning(f"[SERVER] timed out connection from {addr}")
-    except Exception as e:
-        log.error(f"[SERVER] error with {addr}: {e}")
+    except Exception:
+        log.exception(f"[SERVER] error with {addr}")
     finally:
         conn.close()
         log.info(f"[SERVER] disconnected {addr}")
