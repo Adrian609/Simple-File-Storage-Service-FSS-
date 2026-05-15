@@ -1,145 +1,56 @@
-#!/usr/bin/env bash
-#
-# setup_net.sh
-#
-# Transparent MITM setup
-#
-# Topology:
-#   ns_client <-> ns_mitm <-> ns_server
-#
-# Addresses:
-#   ns_client : 10.0.7.2/24
-#   ns_mitm   : 10.0.7.1/24  (toward client)
-#             : 10.0.8.1/24  (toward server)
-#   ns_server : 10.0.8.2/24
-#
-# Service:
-#   real server listens on 10.0.8.2:9001
-#
-# MITM:
-#   transparent listener on local port 15000 inside ns_mitm
-#
-# Run:
-#   sudo ./setup_net.sh
-#
+#!/bin/bash
+# Sets up three network namespaces for FSS project testing:
+# ns_client, ns_mitm, ns_server
 
-set -euo pipefail
+set -e
 
-NS_CLIENT="ns_client"
-NS_MITM="ns_mitm"
-NS_SERVER="ns_server"
+# Clean up existing namespaces if present
+for ns in ns_client ns_mitm ns_server; do
+    ip netns del $ns 2>/dev/null || true
+done
 
-VETH_C="veth_c"
-VETH_M1="veth_m1"
-VETH_S="veth_s"
-VETH_M2="veth_m2"
+# Create namespaces
+ip netns add ns_client
+ip netns add ns_mitm
+ip netns add ns_server
 
-CLIENT_IP_CIDR="10.0.7.2/24"
-MITM_CLIENT_IP_CIDR="10.0.7.1/24"
-SERVER_IP_CIDR="10.0.8.2/24"
-MITM_SERVER_IP_CIDR="10.0.8.1/24"
+# Create veth pairs
+ip link add veth_c type veth peer name veth_cm
+ip link add veth_ms type veth peer name veth_sm
 
-CLIENT_NET="10.0.7.0/24"
-SERVER_NET="10.0.8.0/24"
+# Move interfaces to namespaces
+ip link set veth_c netns ns_client
+ip link set veth_cm netns ns_mitm
+ip link set veth_ms netns ns_mitm
+ip link set veth_sm netns ns_server
 
-MITM_CLIENT_IP="10.0.7.1"
-MITM_SERVER_IP="10.0.8.1"
+# Configure client side
+ip netns exec ns_client ip addr add 10.0.1.2/24 dev veth_c
+ip netns exec ns_client ip link set veth_c up
+ip netns exec ns_client ip link set lo up
+ip netns exec ns_client ip route add default via 10.0.1.1
 
-SERVER_IP="10.0.8.2"
-SERVER_PORT="9001"
-MITM_PORT="15000"
+# Configure mitm side
+ip netns exec ns_mitm ip addr add 10.0.1.1/24 dev veth_cm
+ip netns exec ns_mitm ip addr add 10.0.8.1/24 dev veth_ms
+ip netns exec ns_mitm ip link set veth_cm up
+ip netns exec ns_mitm ip link set veth_ms up
+ip netns exec ns_mitm ip link set lo up
+ip netns exec ns_mitm sysctl -w net.ipv4.ip_forward=1 > /dev/null
+ip netns exec ns_mitm sysctl -w net.ipv4.conf.all.route_localnet=1 > /dev/null
 
-TPROXY_MARK="1"
-TPROXY_TABLE="100"
+# Configure server side
+ip netns exec ns_server ip addr add 10.0.8.2/24 dev veth_sm
+ip netns exec ns_server ip link set veth_sm up
+ip netns exec ns_server ip link set lo up
 
-log() {
-    echo "[setup_net] $*"
-}
+# Redirect traffic through MITM using iptables
+ip netns exec ns_mitm iptables -t mangle -A PREROUTING -p tcp --dport 9001 -j TPROXY \
+    --tproxy-mark 1 --on-port 15000
+ip netns exec ns_mitm ip rule add fwmark 1 lookup 100
+ip netns exec ns_mitm ip route add local 0.0.0.0/0 dev lo table 100
 
-delete_ns_if_exists() {
-    local ns="$1"
-    if ip netns list | awk '{print $1}' | grep -qx "$ns"; then
-        log "Deleting existing namespace: $ns"
-        ip netns del "$ns"
-    fi
-}
-
-if [[ "${EUID}" -ne 0 ]]; then
-    echo "Run as root: sudo ./setup_net.sh" >&2
-    exit 1
-fi
-
-command -v ip >/dev/null 2>&1 || { echo "Missing: ip"; exit 1; }
-command -v nft >/dev/null 2>&1 || { echo "Missing: nft"; exit 1; }
-
-log "Cleaning up previous run"
-delete_ns_if_exists "$NS_CLIENT"
-delete_ns_if_exists "$NS_MITM"
-delete_ns_if_exists "$NS_SERVER"
-
-log "Creating namespaces"
-ip netns add "$NS_CLIENT"
-ip netns add "$NS_MITM"
-ip netns add "$NS_SERVER"
-
-log "Creating veth pairs"
-ip link add "$VETH_C" type veth peer name "$VETH_M1"
-ip link add "$VETH_S" type veth peer name "$VETH_M2"
-
-log "Moving interfaces into namespaces"
-ip link set "$VETH_C" netns "$NS_CLIENT"
-ip link set "$VETH_M1" netns "$NS_MITM"
-ip link set "$VETH_S" netns "$NS_SERVER"
-ip link set "$VETH_M2" netns "$NS_MITM"
-
-log "Assigning IPs"
-ip netns exec "$NS_CLIENT" ip addr add "$CLIENT_IP_CIDR" dev "$VETH_C"
-ip netns exec "$NS_MITM"  ip addr add "$MITM_CLIENT_IP_CIDR" dev "$VETH_M1"
-
-ip netns exec "$NS_SERVER" ip addr add "$SERVER_IP_CIDR" dev "$VETH_S"
-ip netns exec "$NS_MITM"  ip addr add "$MITM_SERVER_IP_CIDR" dev "$VETH_M2"
-
-log "Bringing interfaces up"
-ip netns exec "$NS_CLIENT" ip link set lo up
-ip netns exec "$NS_CLIENT" ip link set "$VETH_C" up
-
-ip netns exec "$NS_MITM" ip link set lo up
-ip netns exec "$NS_MITM" ip link set "$VETH_M1" up
-ip netns exec "$NS_MITM" ip link set "$VETH_M2" up
-
-ip netns exec "$NS_SERVER" ip link set lo up
-ip netns exec "$NS_SERVER" ip link set "$VETH_S" up
-
-log "Adding routes"
-ip netns exec "$NS_CLIENT" ip route add "$SERVER_NET" via "$MITM_CLIENT_IP"
-ip netns exec "$NS_SERVER" ip route add "$CLIENT_NET" via "$MITM_SERVER_IP"
-
-log "Enabling forwarding in ns_mitm"
-ip netns exec "$NS_MITM" sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-log "Clearing any old nftables config in ns_mitm"
-ip netns exec "$NS_MITM" sh -c "nft delete table ip tproxy_lab 2>/dev/null || true"
-
-log "Installing nftables TPROXY rules in ns_mitm"
-ip netns exec "$NS_MITM" nft -f - <<EOF
-table ip tproxy_lab {
-    chain prerouting {
-        type filter hook prerouting priority -150; policy accept;
-
-        # Packets that already belong to a transparent local socket
-        meta l4proto tcp socket transparent 1 meta mark set ${TPROXY_MARK} accept
-
-        # New client traffic to the real server
-        ip daddr ${SERVER_IP} tcp dport ${SERVER_PORT} tproxy to :${MITM_PORT} meta mark set ${TPROXY_MARK} accept
-    }
-}
-EOF
-
-log "Installing policy routing in ns_mitm"
-ip netns exec "$NS_MITM" sh -c "ip rule del fwmark ${TPROXY_MARK} lookup ${TPROXY_TABLE} 2>/dev/null || true"
-ip netns exec "$NS_MITM" sh -c "ip route flush table ${TPROXY_TABLE} 2>/dev/null || true"
-ip netns exec "$NS_MITM" ip rule add fwmark "$TPROXY_MARK" lookup "$TPROXY_TABLE"
-ip netns exec "$NS_MITM" ip route add local 0.0.0.0/0 dev lo table "$TPROXY_TABLE"
-
-log "Done"
-
+echo "[setup_net] network namespaces ready"
+echo "  ns_client: 10.0.1.2"
+echo "  ns_mitm:   10.0.1.1 / 10.0.8.1"
+echo "  ns_server: 10.0.8.2"

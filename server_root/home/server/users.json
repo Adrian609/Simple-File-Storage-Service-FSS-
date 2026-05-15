@@ -1,6 +1,6 @@
 {
-    "alice": "alice123",
-    "bob": "bob123",
-    "charlie": "charlie123",
-    "mitm": "mitm123"
+    "alice": "$2b$12$xOFvzlwcrLPntK7OVOdubehCQ1fuFvA.Zz4a/MYISAP3i1xBynXuK",
+    "bob": "$2b$12$9l0hVVLjLLEI6cgrRiNetuTUzGMiH6OAEdWPY7fITNB1mGGDtdKna",
+    "charlie": "$2b$12$wpHdsUNj52wsuHfVMgN4sOyCvawXJz4aZo18qGpox1YyjaMGgohoi",
+    "mitm": "$2b$12$qlpGAZ5UMMfxN0HZMBCkaubyBNAK5LON/0nfLJkMVLu/TtkpQzyAq"
 }

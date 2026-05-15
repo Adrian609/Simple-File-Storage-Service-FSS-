@@ -4,11 +4,9 @@ Network Security - University of Denver
 
 server.py
 
-This file holds the server code for a simple file storage service. The code is
-intentionally not secure for use in an adversarial network setting. You goal 
-is to review and rewrite the code to make it secure in such a setting, while
-keeping its functionality intact. Review the documentation posted in Canvas for
-details.
+This file holds the server code for a simple file storage service. The original
+code was not secure for use in an adversarial network setting. This version has
+been rewritten to address the security requirements of the project.
 
 """
 
@@ -20,344 +18,572 @@ import threading
 import uuid
 import sys
 import hashlib
+import logging
+import time
+import base64
 
-HOST = "10.0.8.2"                # server namespace IP
-PORT = 9001                      # server listening port
-STORAGE_DIR = "server_storage"   # folder where files are stored
+import bcrypt
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.x509 import load_pem_x509_certificate
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.primitives.asymmetric import padding as apad
+from cryptography.hazmat.primitives import hashes as hsh
+from cryptography.exceptions import InvalidSignature
 
-SESSIONS = {}                    # server tokens dictionary
+HOST = "10.0.8.2"
+PORT = 9001
+STORAGE_DIR = "server_storage"
+
+SESSIONS = {}
 CLIENT_LIMIT = 512  # DO NOT CHANGE: only enough resources to allow 1024 clients
 
+MAX_MESSAGE_BYTES = 10 * 1024 * 1024  # reject messages larger than 10MB
+NONCE_WINDOW = 60                      # seconds before a nonce expires
+RATE_WINDOW = 60                       # sliding window for rate limiting
+RATE_MAX = 10                          # max attempts per window per IP
 
-# Semaphore to enforce max connections
+CERT_PATH = "server_cert.pem"
+KEY_PATH  = "server_key.pem"
+
 connection_semaphore = threading.Semaphore(CLIENT_LIMIT)
 
+SEEN_NONCES = {}
+SEEN_NONCES_LOCK = threading.Lock()
+
+RATE_TRACKER = {}
+RATE_TRACKER_LOCK = threading.Lock()
+
+# log security events to a file so they are not lost on restart
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("server_security.log"),
+        logging.StreamHandler(sys.stdout),
+    ]
+)
+log = logging.getLogger("fss_server")
 
 # You may decide to store the user and password data in a different manner, but
 # whatever method you use, the account 'mitm' with password 'mitm123' must be
 # present. Consider it an account that an attacker created on the system.
 try:
-
-    with open("users.json", "r") as file:   # load user names and passwords
-        USERS = json.load(file)
-        
+    with open("users.json", "r") as f:
+        USERS = json.load(f)
 except Exception as e:
-    print(f"[SERVER] error reading user file: {e}")
-    sys.exit(1)
-    
-# Check if storage directory exists
-if not os.path.isdir(STORAGE_DIR):
-    print("[SERVER] storage directory not found")
+    log.error(f"[SERVER] error reading user file: {e}")
     sys.exit(1)
 
+if not os.path.isdir(STORAGE_DIR):
+    log.error("[SERVER] storage directory not found")
+    sys.exit(1)
+
+# load server certificate and private key for the handshake
+try:
+    with open(CERT_PATH, "rb") as f:
+        SERVER_CERT_PEM = f.read()
+    with open(KEY_PATH, "rb") as f:
+        SERVER_PRIVATE_KEY = load_pem_private_key(f.read(), password=None)
+except Exception as e:
+    log.error(f"[SERVER] error loading certificate: {e}")
+    sys.exit(1)
+
+
+def derive_session_key(shared_secret: bytes) -> bytes:
+    """
+    Derive an AES key from the ECDH shared secret using HKDF.
+    """
+    hkdf = HKDF(algorithm=SHA256(), length=32, salt=None, info=b"fss-session-key")
+    return hkdf.derive(shared_secret)
+
+
+def encrypt_message(key: bytes, plaintext: str) -> bytes:
+    """
+    Encrypt a string using AES-GCM. Returns base64-encoded ciphertext with
+    the nonce prepended.
+    """
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)
+    ct = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
+    return base64.b64encode(nonce + ct)
+
+
+def decrypt_message(key: bytes, data: str) -> str:
+    """
+    Decrypt a base64-encoded AES-GCM message. Raises on tamper detection.
+    """
+    raw = base64.b64decode(data)
+    nonce, ct = raw[:12], raw[12:]
+    aesgcm = AESGCM(key)
+    return aesgcm.decrypt(nonce, ct, None).decode("utf-8")
 
 
 def recv_line(conn):
     """
-    Receive data from a network connection until a newline
+    Receive data from a network connection until a newline.
+    Drops connection if message exceeds MAX_MESSAGE_BYTES.
 
     :param conn: a network connection object
     :returns: read data (without the ending newline)
     """
-    
     data = b""
     while not data.endswith(b"\n"):
         chunk = conn.recv(4096)
         if not chunk:
             return None
         data += chunk
+        if len(data) > MAX_MESSAGE_BYTES:
+            log.warning("[SERVER] oversized message received, dropping connection")
+            return None
     return data.decode("utf-8").strip()
 
 
-def send_json(conn, obj):
+def send_raw(conn, text: str):
     """
-    Write a dictionary object as JSON to a network connection
-    
+    Send a plain text line. Used only during the handshake before
+    the session key is established.
+    """
+    conn.sendall((text + "\n").encode("utf-8"))
+
+
+def send_json(conn, key: bytes, obj: dict):
+    """
+    Encrypt a dictionary as JSON and send it over the connection.
+
     :param conn: a network connection object
+    :param key: the session encryption key
     :param obj: a dictionary object
     """
-    
-    conn.sendall((json.dumps(obj) + "\n").encode("utf-8"))
+    conn.sendall(encrypt_message(key, json.dumps(obj)) + b"\n")
+
+
+def recv_json(conn, key: bytes):
+    """
+    Receive an encrypted line and decrypt it to a dictionary.
+    """
+    line = recv_line(conn)
+    if line is None:
+        return None
+    return json.loads(decrypt_message(key, line))
+
+
+def perform_handshake(conn):
+    """
+    Perform ECDH key exchange with the client to establish an encrypted
+    session. The server sends its certificate so the client can verify
+    its identity, then both sides derive the same session key.
+
+    :param conn: a network connection object
+    :returns: session key bytes, or None if the handshake fails
+    """
+    try:
+        # send server certificate so client can verify who it is talking to
+        cert_b64 = base64.b64encode(SERVER_CERT_PEM).decode("utf-8")
+        send_raw(conn, json.dumps({"type": "CERT", "cert": cert_b64}))
+
+        # receive client ECDH public key
+        line = recv_line(conn)
+        if not line:
+            return None
+        msg = json.loads(line)
+        if msg.get("type") != "CLIENT_PUB":
+            return None
+        client_pub = X25519PublicKey.from_public_bytes(base64.b64decode(msg["pub"]))
+
+        # generate a fresh server ECDH keypair for this session
+        server_priv = X25519PrivateKey.generate()
+        server_pub_bytes = server_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+        # sign the ECDH public key with the server certificate key so the
+        # client can verify it came from the real server
+        signature = SERVER_PRIVATE_KEY.sign(server_pub_bytes, apad.PKCS1v15(), hsh.SHA256())
+
+        send_raw(conn, json.dumps({
+            "type": "SERVER_PUB",
+            "pub": base64.b64encode(server_pub_bytes).decode("utf-8"),
+            "sig": base64.b64encode(signature).decode("utf-8"),
+        }))
+
+        # derive the shared session key from the ECDH exchange
+        shared_secret = server_priv.exchange(client_pub)
+        session_key = derive_session_key(shared_secret)
+        log.info("[SERVER] handshake complete, encrypted session established")
+        return session_key
+
+    except Exception as e:
+        log.error(f"[SERVER] handshake error: {e}")
+        return None
+
+
+def check_replay(req: dict) -> bool:
+    """
+    Check that a request is not a replay. Verifies the nonce has not been
+    seen before and the timestamp is within the acceptable window.
+
+    :param req: the received request dictionary
+    :returns: True if request is fresh, False if it should be rejected
+    """
+    nonce = req.get("nonce", "")
+    ts = req.get("ts", 0)
+
+    if not nonce:
+        log.warning("[SERVER] request missing nonce, rejected")
+        return False
+
+    now = time.time()
+    if abs(now - ts) > NONCE_WINDOW:
+        log.warning(f"[SERVER] request timestamp outside window: {ts}")
+        return False
+
+    with SEEN_NONCES_LOCK:
+        # clean up expired nonces to keep memory usage down
+        expired = [n for n, t in SEEN_NONCES.items() if now - t > NONCE_WINDOW]
+        for n in expired:
+            del SEEN_NONCES[n]
+
+        if nonce in SEEN_NONCES:
+            log.warning(f"[SERVER] replay detected, nonce already seen: {nonce}")
+            return False
+
+        SEEN_NONCES[nonce] = now
+    return True
+
+
+def check_rate_limit(ip: str) -> bool:
+    """
+    Check whether a given IP address has exceeded the request rate limit.
+
+    :param ip: client IP address string
+    :returns: True if allowed, False if rate limit exceeded
+    """
+    now = time.time()
+    with RATE_TRACKER_LOCK:
+        if ip not in RATE_TRACKER:
+            RATE_TRACKER[ip] = []
+        RATE_TRACKER[ip] = [t for t in RATE_TRACKER[ip] if now - t < RATE_WINDOW]
+        if len(RATE_TRACKER[ip]) >= RATE_MAX:
+            log.warning(f"[SERVER] rate limit exceeded for {ip}")
+            return False
+        RATE_TRACKER[ip].append(now)
+    return True
+
+
+def validate_username(username: str) -> bool:
+    """
+    Reject usernames that contain characters which could be used for
+    path manipulation or cause filesystem issues.
+
+    :param username: the username string to validate
+    :returns: True if valid, False otherwise
+    """
+    if not username or len(username) > 64:
+        return False
+    for ch in ['/', '\\', '\x00', '..', '<', '>', ':', '"', '|', '?', '*']:
+        if ch in username:
+            return False
+    return True
+
+
+def safe_path(username: str, filename: str):
+    """
+    Build a safe file path by resolving the real path and verifying it
+    stays inside the user's storage directory.
+
+    :param username: the authenticated username
+    :param filename: the requested filename
+    :returns: resolved safe path string, or None if path traversal detected
+    """
+    user_dir = os.path.realpath(os.path.join(STORAGE_DIR, username))
+    full_path = os.path.realpath(os.path.join(user_dir, filename))
+    if not full_path.startswith(user_dir + os.sep) and full_path != user_dir:
+        log.warning(f"[SERVER] path traversal attempt by {username}: {filename}")
+        return None
+    return full_path
 
 
 def require_auth(req):
     """
-    Retrieve username associated with a token from SESSIONS global
-    
+    Retrieve username associated with a token from SESSIONS global.
+
     :param req: a received request
-    :returns: username corresponding to token in request
+    :returns: username corresponding to token in request, or None
     """
-    
     token = req.get("token", "")
     return SESSIONS.get(token)
 
 
 def add_to_sessions(token, username):
     """
-    Add a token and username to SESSIONS global
-    
+    Add a token and username to SESSIONS global.
+
     :param token: a token
     :param username: a username
-    :returns: True on suceess, else False
+    :returns: True on success, else False
     """
-    
     if len(SESSIONS) < CLIENT_LIMIT:
         SESSIONS[token] = username
         return True
-    else:
-        return False
-    
+    return False
 
-def handle_create(conn, req):
-    """
-    Handle the CREATE command
 
-    :param conn: a network connection object
-    :param req: a received request
+def handle_create(conn, key, req, client_ip):
     """
-    
+    Handle the CREATE command.
+    """
+    if not check_rate_limit(client_ip):
+        send_json(conn, key, {"status": "error", "message": "too many requests, try again later"})
+        return
+
     username = req.get("username", "").strip()
     password = req.get("password", "").strip()
 
     if not username or not password:
-        send_json(conn, {"status": "error", "message": "missing username or password"})
+        send_json(conn, key, {"status": "error", "message": "missing username or password"})
+        return
+
+    if not validate_username(username):
+        log.warning(f"[SERVER] invalid username attempt from {client_ip}: {username}")
+        send_json(conn, key, {"status": "error", "message": "invalid username"})
         return
 
     if username in USERS:
-        send_json(conn, {"status": "error", "message": "user already exists"})
+        send_json(conn, key, {"status": "error", "message": "user already exists"})
         return
 
-    # Create user directory
-    user_dir = f"{STORAGE_DIR}/{username}"
-    os.makedirs(user_dir, exist_ok=True)
-    
-    # Update in-memory users
-    USERS[username] = password
+    # hash the password before storing it
+    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-    # Write back to users.json
+    user_dir = os.path.join(STORAGE_DIR, username)
+    os.makedirs(user_dir, exist_ok=True)
+    USERS[username] = hashed
+
     with open("users.json", "w", encoding="utf-8") as f:
         json.dump(USERS, f, indent=4)
 
-    send_json(conn, {"status": "ok", "message": "account created"})
+    log.info(f"[SERVER] account created: {username} from {client_ip}")
+    send_json(conn, key, {"status": "ok", "message": "account created", "req_id": req.get("req_id", "")})
 
-        
-def handle_auth(conn, req):
+
+def handle_auth(conn, key, req, client_ip):
     """
-    Handle the AUTH command
-    
-    :param conn: a network connection object
-    :param req: a received request
+    Handle the AUTH command.
     """
-    
+    if not check_rate_limit(client_ip):
+        send_json(conn, key, {"status": "error", "message": "too many requests, try again later"})
+        return
+
     username = req.get("username", "")
     password = req.get("password", "")
 
-    # Check password, then generate and respond with token
-    if username in USERS and USERS[username] == password:
-        token = str(uuid.uuid4())
-        if add_to_sessions(token, username) is True:
-            send_json(conn, {"status": "ok", "token": token})
-        else:
-            send_json(conn, {"status": "error", "message": "server overload"})
-    else:
-        send_json(conn, {"status": "error", "message": "invalid credentials"})
+    if username in USERS:
+        stored = USERS[username].encode("utf-8")
+        try:
+            if bcrypt.checkpw(password.encode("utf-8"), stored):
+                token = str(uuid.uuid4())
+                if add_to_sessions(token, username):
+                    log.info(f"[SERVER] auth success: {username} from {client_ip}")
+                    send_json(conn, key, {"status": "ok", "token": token, "req_id": req.get("req_id", "")})
+                else:
+                    send_json(conn, key, {"status": "error", "message": "server overload"})
+                return
+        except Exception:
+            pass
+
+    log.warning(f"[SERVER] auth failure: {username} from {client_ip}")
+    send_json(conn, key, {"status": "error", "message": "invalid credentials"})
 
 
-def handle_list(conn, req):
+def handle_list(conn, key, req):
     """
-    Handle the LIST command
-    
-    :param conn: a network connection object
-    :param req: a received request
+    Handle the LIST command.
     """
-    
-    # Check token
     username = require_auth(req)
     if not username:
-        send_json(conn, {"status": "error", "message": "unauthorized"})
+        send_json(conn, key, {"status": "error", "message": "unauthorized"})
         return
 
-    user_dir = f"{STORAGE_DIR}/{username}"
+    user_dir = os.path.join(STORAGE_DIR, username)
 
-    # Read metadata of files in user's directory and form response 
     try:
         files = []
         for filename in os.listdir(user_dir):
             path = os.path.join(user_dir, filename)
-
             if not os.path.isfile(path):
                 continue
-
             with open(path, "rb") as f:
                 digest = hashlib.sha256(f.read()).hexdigest()
-
             modified_ts = os.path.getmtime(path)
-
             files.append({
                 "name": filename,
                 "modified_ts": modified_ts,
                 "digest": digest,
             })
-
-        send_json(conn, {"status": "ok", "files": files})
+        log.info(f"[SERVER] list by {username}")
+        send_json(conn, key, {"status": "ok", "files": files, "req_id": req.get("req_id", "")})
     except Exception as e:
-        send_json(conn, {"status": "error", "message": str(e)})
+        send_json(conn, key, {"status": "error", "message": str(e)})
 
 
-def handle_upload(conn, req):
+def handle_upload(conn, key, req):
     """
-    Handle the UPLOAD command
-    
-    :param conn: a network connection object
-    :param req: a received request
+    Handle the UPLOAD command.
     """
-    
-    # Check token
     username = require_auth(req)
     if not username:
-        send_json(conn, {"status": "error", "message": "unauthorized"})
+        send_json(conn, key, {"status": "error", "message": "unauthorized"})
         return
 
     filename = req.get("filename", "")
     content = req.get("content", "")
-    path = os.path.join(f"{STORAGE_DIR}/{username}", filename)
+
+    path = safe_path(username, filename)
+    if not path:
+        send_json(conn, key, {"status": "error", "message": "invalid filename"})
+        return
 
     try:
-        # Create a file with the provided contents
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
-            
-        # Obtain metadata to include in response
         ts = os.path.getmtime(path)
         sha256_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-                
-        send_json(conn, {
+        log.info(f"[SERVER] upload: {filename} by {username}")
+        send_json(conn, key, {
             "status": "ok",
             "message": f"upload complete for {username}",
             "ts": ts,
-            "sha256":sha256_digest,
+            "sha256": sha256_digest,
+            "req_id": req.get("req_id", ""),
         })
     except Exception as e:
-        send_json(conn, {"status": "error", "message": str(e)})
+        send_json(conn, key, {"status": "error", "message": str(e)})
 
 
-def handle_download(conn, req):
+def handle_download(conn, key, req):
     """
-    Handle the DOWLOAD command
-    
-    :param conn: a network connection object
-    :param req: a received request
+    Handle the DOWNLOAD command.
     """
-    
-    # Check token
     username = require_auth(req)
     if not username:
-        send_json(conn, {"status": "error", "message": "unauthorized"})
+        send_json(conn, key, {"status": "error", "message": "unauthorized"})
         return
 
     filename = req.get("filename", "")
-    path = os.path.join(f"{STORAGE_DIR}/{username}", filename) 
+    path = safe_path(username, filename)
+    if not path:
+        send_json(conn, key, {"status": "error", "message": "invalid filename"})
+        return
 
     try:
-        # Read the file contents
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-
-        # Obtain metadata to include in response
         modified_ts = os.path.getmtime(path)
         sha256_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-        send_json(conn, {
+        log.info(f"[SERVER] download: {filename} by {username}")
+        send_json(conn, key, {
             "status": "ok",
             "filename": filename,
             "content": content,
             "modified_ts": modified_ts,
             "sha256": sha256_digest,
+            "req_id": req.get("req_id", ""),
         })
     except Exception as e:
-        send_json(conn, {"status": "error", "message": str(e)})
+        send_json(conn, key, {"status": "error", "message": str(e)})
 
 
-def handle_logout(conn, req):
+def handle_logout(conn, key, req):
     """
-    Handle the LOGOUT command
-    
-    :param conn: a network connection object
-    :param req: a received request
+    Handle the LOGOUT command.
     """
-    
-    # Check token
-    username = require_auth(req)
+    token = req.get("token", "")
+    username = SESSIONS.get(token)
     if not username:
-        send_json(conn, {"status": "error", "message": "unauthorized"})
+        send_json(conn, key, {"status": "error", "message": "unauthorized"})
         return
-    
-    # Send response
-    send_json(conn, {"status": "ok", "message": f"{username} logged out"})    
-        
-        
-def dispatch(conn, req):
+
+    # remove the token so it cannot be reused after logout
+    del SESSIONS[token]
+    log.info(f"[SERVER] logout: {username}")
+    send_json(conn, key, {"status": "ok", "message": f"{username} logged out", "req_id": req.get("req_id", "")})
+
+
+def dispatch(conn, key, req, client_ip):
     """
-    Retrive command from request and run handler
-    
+    Retrieve command from request and run handler.
+
     :param conn: a network connection object
+    :param key: the session encryption key
     :param req: a received request
+    :param client_ip: the client IP address
     """
-    
     action = req.get("action", "")
+    req_id = req.get("req_id", "")
+
+    # reject replayed or stale requests before doing anything else
+    if not check_replay(req):
+        send_json(conn, key, {"status": "error", "message": "request rejected", "req_id": req_id})
+        return
+
+    # pass req_id into req so handlers can include it in responses
+    req["req_id"] = req_id
 
     if action == "CREATE":
-        handle_create(conn, req)
+        handle_create(conn, key, req, client_ip)
     elif action == "AUTH":
-        handle_auth(conn, req)
+        handle_auth(conn, key, req, client_ip)
     elif action == "LIST":
-        handle_list(conn, req)
+        handle_list(conn, key, req)
     elif action == "UPLOAD":
-        handle_upload(conn, req)
+        handle_upload(conn, key, req)
     elif action == "DOWNLOAD":
-        handle_download(conn, req)
+        handle_download(conn, key, req)
     elif action == "LOGOUT":
-        handle_logout(conn, req)
+        handle_logout(conn, key, req)
     else:
-        send_json(conn, {"status": "error", "message": "unknown action"})
+        send_json(conn, key, {"status": "error", "message": "unknown action", "req_id": req_id})
 
 
 def handle_client(conn, addr):
     """
-    The command processing loop for a client -- read a request and dispatch
-    
+    The command processing loop for a client -- perform handshake, then
+    read and dispatch requests.
+
     :param conn: a network connection object
     :param addr: the (IP, PORT) tuple of client
     """
-    
-    print(f"[SERVER] connection from {addr}")
+    client_ip = addr[0]
+    log.info(f"[SERVER] connection from {addr}")
     try:
+        # establish encrypted session before processing any commands
+        session_key = perform_handshake(conn)
+        if not session_key:
+            log.warning(f"[SERVER] handshake failed with {addr}")
+            conn.close()
+            connection_semaphore.release()
+            return
+
         while True:
-            line = recv_line(conn)  # receive request
-            if line is None:
+            req = recv_json(conn, session_key)
+            if req is None:
                 break
-
-            try:
-                req = json.loads(line) # convert request to JSON
-            except json.JSONDecodeError:
-                send_json(conn, {"status": "error", "message": "invalid json"})
-                continue
-
-            print(f"[SERVER] recv: {req}")
-            dispatch(conn, req)  # handle the command
+            log.info(f"[SERVER] recv from {addr}: action={req.get('action', '?')}")
+            dispatch(conn, session_key, req, client_ip)
 
     except Exception as e:
-        print(f"[SERVER] error with {addr}: {e}")
+        log.error(f"[SERVER] error with {addr}: {e}")
     finally:
         conn.close()
-        print(f"[SERVER] disconnected {addr}")
+        log.info(f"[SERVER] disconnected {addr}")
+        connection_semaphore.release()
 
 
 def signal_handler(sig, frame):
     print("\n[SERVER] Shutting down")
     sys.exit(0)
-    
-
 
 
 def main():
@@ -365,8 +591,6 @@ def main():
     Create server to listen for connections. A maximum of CLIENT_LIMIT connections
     are allowed. DO NOT MODIFY the value of CLIENT_LIMIT.
     """
-    
-    # Register the handler for Ctrl+C (SIGINT)
     signal.signal(signal.SIGINT, signal_handler)
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -374,26 +598,25 @@ def main():
         s.settimeout(1.0)
         s.bind((HOST, PORT))
         s.listen(128)
-        
+
         print(f"[SERVER] listening on {HOST}:{PORT}")
 
         while True:
             try:
                 conn, addr = s.accept()
             except socket.timeout:
-                continue  # loop back and try accept() again
+                continue
             except Exception as e:
                 print(f"[SERVER] shutting down: {e}")
                 break
-            
+
             if connection_semaphore.acquire(blocking=False):
                 threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
             else:
                 print(f"[SERVER] rejected connection from {addr}")
-                send_json(conn, {"status": "error", "message": "server busy, try again later"})
-                conn.close
-                
-                
+                conn.sendall(b'{"status":"error","message":"server busy, try again later"}\n')
+                conn.close()
+
 
 if __name__ == "__main__":
     main()
