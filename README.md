@@ -98,3 +98,11 @@ rejects responses with a missing or mismatched `req_id`.
 - Oversized messages are dropped.
 - AUTH and CREATE are rate limited by source IP.
 - Security events are written to `server_security.log`.
+
+## Security Validation Tests
+
+See `SECURITY_TESTS.md` for the certificate SAN verification command and the
+standalone MITM ciphertext, path traversal, and logout-token reuse tests.
+
+See `SECURITY_NOTES.md` for certificate/private-key handling guidance before
+sharing the project or publishing it to GitHub.
