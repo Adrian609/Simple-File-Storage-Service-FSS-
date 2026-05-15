@@ -1,0 +1,13 @@
+[SERVER] listening on 10.0.8.2:9001
+2026-05-15 16:24:44,535 [INFO] [SERVER] connection from ('10.0.1.2', 59900)
+2026-05-15 16:24:44,546 [INFO] [SERVER] handshake complete, encrypted session established
+2026-05-15 16:25:49,400 [INFO] [SERVER] connection from ('10.0.1.2', 36666)
+2026-05-15 16:25:49,405 [INFO] [SERVER] handshake complete, encrypted session established
+2026-05-15 16:25:49,405 [INFO] [SERVER] recv from ('10.0.1.2', 36666): action=AUTH
+2026-05-15 16:25:49,559 [INFO] [SERVER] auth success: alice from 10.0.1.2
+2026-05-15 16:25:49,560 [INFO] [SERVER] recv from ('10.0.1.2', 36666): action=LIST
+2026-05-15 16:25:49,572 [INFO] [SERVER] list by alice
+2026-05-15 16:25:49,573 [INFO] [SERVER] recv from ('10.0.1.2', 36666): action=LOGOUT
+2026-05-15 16:25:49,573 [INFO] [SERVER] logout: alice
+2026-05-15 16:25:49,573 [INFO] [SERVER] disconnected ('10.0.1.2', 36666)
+2026-05-15 16:26:06,541 [INFO] [SERVER] disconnected ('10.0.1.2', 59900)
