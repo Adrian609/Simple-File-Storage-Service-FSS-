@@ -33,7 +33,7 @@ from cryptography.hazmat.primitives import hashes as hsh
 from cryptography.exceptions import InvalidSignature
 
 # Class namespace server IP from setup_net; not a secret and must match cert SAN.
-SERVER_HOST = "127.0.0.1"
+SERVER_HOST = "10.0.8.2"
 SERVER_PORT = 9001
 
 MAX_MESSAGE_BYTES = 10 * 1024 * 1024
@@ -119,6 +119,7 @@ def send_recv(sock, key: bytes, obj: dict) -> dict:
 def certificate_matches_host(server_cert, expected_host: str) -> bool:
     """
     Confirm the certificate identity matches the server we intended to reach.
+    Requires exact match: IP address in SERVER_HOST must be present in certificate SAN.
     """
     try:
         expected_ip = ipaddress.ip_address(expected_host)
@@ -128,16 +129,15 @@ def certificate_matches_host(server_cert, expected_host: str) -> bool:
     try:
         san = server_cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
         if expected_ip is not None:
-            # If connecting to loopback during local tests, accept any IP SAN
-            try:
-                if expected_ip.is_loopback:
-                    return len(san.get_values_for_type(x509.IPAddress)) > 0
-            except Exception:
-                pass
-            return expected_ip in san.get_values_for_type(x509.IPAddress)
+            # Require exact IP SAN match; no loopback bypass
+            if expected_ip in san.get_values_for_type(x509.IPAddress):
+                return True
+            print(f"[CLIENT] certificate SAN IP mismatch: expected {expected_ip}, got {san.get_values_for_type(x509.IPAddress)}")
+            return False
         return expected_host.lower() in [name.lower() for name in san.get_values_for_type(x509.DNSName)]
     except x509.ExtensionNotFound:
-            return False
+        print("[CLIENT] certificate SAN extension not found")
+        return False
 
 
 def verify_server_certificate(cert_pem: bytes, expected_host: str):

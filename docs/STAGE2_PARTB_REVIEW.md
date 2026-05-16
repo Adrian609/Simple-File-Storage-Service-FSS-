@@ -50,8 +50,8 @@ Expected baseline-style roots are present:
 
 Supporting validation/documentation files are also present:
 
-- `SECURITY_TESTS.md`
-- `SECURITY_NOTES.md`
+- `docs/SECURITY_TESTS.md`
+- `docs/SECURITY_NOTES.md`
 - `tests/*.py`
 - `scripts/check_sensitive_keys.sh`
 - `.env.example`
@@ -69,7 +69,7 @@ Files removed or absent as desired:
 | Coherence | PASS | The design is a coherent client/server security design: authenticated key exchange, encrypted application protocol, replay controls, token sessions, and filesystem validation. |
 | Consistency with implementation | PASS | The main claims are implemented in `client.py` and `server.py`. Request `req_id` binding is implemented in `client.py:89-113` and response generation in `server.py:167-178`. |
 | Clarity/completeness | PASS | The document includes overview, protocol changes, and an action/requirement table. |
-| Honest limitations | PARTIAL | The docs do not claim file encryption at rest, which is good. They could more explicitly state that storage files remain plaintext on the server filesystem. |
+| Honest limitations | PASS | README and `docs/SECURITY_NOTES.md` explicitly state that storage files remain plaintext on the server filesystem. |
 | Format match to initial document | PARTIAL | The final document is a Markdown table. If the initial submission used an `.xlsx` or instructor-specific template, confirm the Markdown format is acceptable or export it to the required format before submission. |
 
 ## Implementation Review
@@ -95,7 +95,7 @@ Files removed or absent as desired:
 | Socket disconnect handling | PASS | `recv_line` handles disconnect and accepted sockets use timeouts: `server.py:626-662`. |
 | Message size limits | PASS | 10 MB cap in client and server receive loops: `client.py:38`, `client.py:73-85`, `server.py:45`, `server.py:129-146`. |
 | Password storage | PASS | `users.json` contains bcrypt hashes, not plaintext. |
-| Hardcoded production secrets | PASS | No production secrets found. Demo server private key remains because server startup requires it; documented in `SECURITY_NOTES.md`. |
+| Hardcoded production secrets | PASS | No production secrets found. Demo server private key remains because server startup requires it; documented in `docs/SECURITY_NOTES.md`. |
 | MITM dependency | PASS | Security does not depend on `mitm.py`. |
 
 ## Request/Response Structure
@@ -225,7 +225,7 @@ Status: PASS with class-demo caveat.
 - CA private key is not present after generation.
 - `server_root/home/server/server_key.pem` remains because `server.py` loads it at startup (`server.py:50-51`, `server.py:91-94`).
 - `.gitignore` excludes `.env`, private key patterns, `.srl`, runtime logs, `.DS_Store`, and Python caches.
-- `SECURITY_NOTES.md` documents the retained server key as demo-only.
+- `docs/SECURITY_NOTES.md` documents the retained server key as demo-only.
 
 Before public GitHub publication, treat the retained demo server private key as exposed and rotate/remove it from published history.
 
@@ -240,9 +240,9 @@ Before public GitHub publication, treat the retained demo server private key as 
 | Demo credentials | PASS | `README.md:65-70`. |
 | Request/response changes | PASS | `README.md:72-84`, design doc section. |
 | Security guarantees | PASS | `README.md:86-100`, design table. |
-| Cert regeneration/SAN | PASS | `SECURITY_NOTES.md:30-47`, `SECURITY_TESTS.md:6-25`. |
-| Stage 3 testing | PASS | `SECURITY_TESTS.md` gives exact commands. |
-| Known limitations | PARTIAL | Should explicitly state: files are not encrypted at rest; rate limiting is in memory/per source IP; sessions and nonce cache are reset on server restart. |
+| Cert regeneration/SAN | PASS | `docs/SECURITY_NOTES.md:30-47`, `docs/SECURITY_TESTS.md:6-25`. |
+| Stage 3 testing | PASS | `docs/SECURITY_TESTS.md` gives exact commands. |
+| Known limitations | PASS | README and `docs/SECURITY_NOTES.md` explicitly state that files are not encrypted at rest and document the class demo private key caveat. |
 
 ## Likely Stage 3 Attack Readiness
 
@@ -282,13 +282,12 @@ No clear high-priority code fix is required based on this review. The live tests
 
 Recommended hardening if time allows:
 
-1. Add an explicit "Limitations" section: no encryption at rest, in-memory rate limits/sessions/nonces, class demo private key only.
-2. Add a small fuzz/manual test for unusual filename inputs, including absolute paths, encoded traversal strings, null-byte-like input, and very long filenames.
-3. Consider enforcing `req_id` uniqueness within a session. Current `req_id` validation is sufficient for response binding, while nonce is the replay control.
+1. Add a small fuzz/manual test for unusual filename inputs, including absolute paths, encoded traversal strings, null-byte-like input, and very long filenames.
+2. Consider enforcing `req_id` uniqueness within a session. Current `req_id` validation is sufficient for response binding, while nonce is the replay control.
 
 ### Documentation fixes
 
-1. Clarify that files are plaintext at rest in `server_storage`.
+1. Confirm the plaintext-at-rest limitation remains visible in README and `docs/SECURITY_NOTES.md`.
 2. Clarify that `.env.example` is documentation only; code currently uses constants.
 3. Keep the demo server private key warning prominent for GitHub/public sharing.
 

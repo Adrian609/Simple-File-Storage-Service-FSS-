@@ -62,6 +62,12 @@ assignment network path, but that namespace only routes packets. An evaluator
 or another group may run their own attacker code there, but the client and
 server do not depend on it.
 
+## Certificate and Security
+
+See [docs/SECURITY_TESTS.md](docs/SECURITY_TESTS.md) for the certificate SAN verification command and the
+class network topology. See [docs/SECURITY_NOTES.md](docs/SECURITY_NOTES.md) for certificate/private-key handling guidance before
+deployment.
+
 ## Test Accounts
 
 - `alice` / `password123`
@@ -99,6 +105,12 @@ rejects responses with a missing or mismatched `req_id`.
 - AUTH and CREATE are rate limited by source IP.
 - Security events are written to `server_security.log`.
 
+## Known Limitations
+
+- This implementation protects credentials, commands, tokens, and file contents in transit from a network MITM.
+- Files are stored in plaintext on the server filesystem and are not encrypted at rest in this Stage 2 Part B implementation.
+- The included server private key is demo-only for the class environment and must be regenerated before any real deployment.
+
 ## Environment Configuration
 
 `.env.example` documents safe class-demo configuration values. The current
@@ -115,8 +127,8 @@ included for the class environment must be regenerated before real deployment.
 
 ## Security Validation Tests
 
-See `SECURITY_TESTS.md` for the certificate SAN verification command and the
+See [docs/SECURITY_TESTS.md](docs/SECURITY_TESTS.md) for the certificate SAN verification command and the
 standalone MITM ciphertext, path traversal, and logout-token reuse tests.
 
-See `SECURITY_NOTES.md` for certificate/private-key handling guidance before
+See [docs/SECURITY_NOTES.md](docs/SECURITY_NOTES.md) for certificate/private-key handling guidance before
 sharing the project or publishing it to GitHub.

@@ -36,7 +36,7 @@ from cryptography.hazmat.primitives import hashes as hsh
 from cryptography.exceptions import InvalidSignature
 
 # Class namespace server IP from setup_net; not a secret and must match cert SAN.
-HOST = "127.0.0.1"
+HOST = "10.0.8.2"
 PORT = 9001
 STORAGE_DIR = "server_storage"
 

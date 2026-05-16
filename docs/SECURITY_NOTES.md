@@ -84,3 +84,9 @@ ignored by `.gitignore` and should not be committed.
 Public certificates may be committed for the class environment. Private keys,
 production secrets, and real deployment configuration should not be committed.
 Regenerate all demo keys before any real deployment.
+
+## Known Limitations
+
+- This implementation protects credentials, commands, tokens, and file contents in transit from a network MITM.
+- Files are stored in plaintext on the server filesystem and are not encrypted at rest in this Stage 2 Part B implementation.
+- The included server private key is demo-only for the class environment and must be regenerated before any real deployment.
