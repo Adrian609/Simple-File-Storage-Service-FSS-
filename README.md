@@ -99,6 +99,18 @@ rejects responses with a missing or mismatched `req_id`.
 - AUTH and CREATE are rate limited by source IP.
 - Security events are written to `server_security.log`.
 
+## Environment Configuration
+
+`.env.example` documents the safe demo values used by the class environment.
+The current client, server, and MITM scripts keep these values as constants, so
+copying `.env.example` to `.env` is optional unless you add a local wrapper that
+loads environment variables.
+
+`.env` and `.env.*` are ignored and should not be committed. Public
+certificates may be committed for the assignment, but private keys, production
+secrets, and real deployment credentials should not be committed. Any demo keys
+included for the class environment must be regenerated before real deployment.
+
 ## Security Validation Tests
 
 See `SECURITY_TESTS.md` for the certificate SAN verification command and the

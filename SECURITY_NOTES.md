@@ -63,3 +63,17 @@ Expected class/demo result:
 Before pushing this project to a public GitHub repository, remove all private
 keys from the published history or rotate/regenerate them. Treat the included
 demo server key as already exposed.
+
+## Environment Configuration
+
+`.env.example` is a safe template containing the class/demo host, port,
+certificate filenames, storage directory, log filename, and protocol limit
+values. It does not contain secrets.
+
+You may copy `.env.example` to `.env` for local wrappers or experiments, but the
+current Python scripts do not load `.env` automatically. Real `.env` files are
+ignored by `.gitignore` and should not be committed.
+
+Public certificates may be committed for the class environment. Private keys,
+production secrets, and real deployment configuration should not be committed.
+Regenerate all demo keys before any real deployment.

@@ -1,3 +1,8 @@
+# Local environment files
+.env
+.env.*
+!.env.example
+
 # Private keys and generated sensitive crypto material
 *.key
 *_key.pem
@@ -19,3 +24,7 @@ tunnelserver_pubpri.pem
 *.log
 server_run.out
 server_run.err
+
+# Python artifacts
+__pycache__/
+*.pyc
