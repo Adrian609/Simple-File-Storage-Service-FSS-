@@ -21,6 +21,7 @@ import hashlib
 import logging
 import time
 import base64
+import string
 
 import bcrypt
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -57,6 +58,9 @@ SEEN_NONCES_LOCK = threading.Lock()
 RATE_TRACKER = {}
 RATE_TRACKER_LOCK = threading.Lock()
 
+USERS_LOCK = threading.Lock()
+SESSIONS_LOCK = threading.Lock()
+
 # log security events to a file so they are not lost on restart
 logging.basicConfig(
     level=logging.INFO,
@@ -74,8 +78,8 @@ log = logging.getLogger("fss_server")
 try:
     with open("users.json", "r") as f:
         USERS = json.load(f)
-except Exception as e:
-    log.error(f"[SERVER] error reading user file: {e}")
+except Exception:
+    log.exception("[SERVER] error reading user file")
     sys.exit(1)
 
 if not os.path.isdir(STORAGE_DIR):
@@ -88,8 +92,8 @@ try:
         SERVER_CERT_PEM = f.read()
     with open(KEY_PATH, "rb") as f:
         SERVER_PRIVATE_KEY = load_pem_private_key(f.read(), password=None)
-except Exception as e:
-    log.error(f"[SERVER] error loading certificate: {e}")
+except Exception:
+    log.exception("[SERVER] error loading certificate")
     sys.exit(1)
 
 
@@ -161,14 +165,35 @@ def send_json(conn, key: bytes, obj: dict):
     conn.sendall(encrypt_message(key, json.dumps(obj)) + b"\n")
 
 
+def make_response(req: dict, status: str, **fields) -> dict:
+    """
+    Build a response that always includes the request ID when one was supplied.
+    """
+    req_id = ""
+    if isinstance(req, dict) and isinstance(req.get("req_id", ""), str):
+        req_id = req.get("req_id", "")
+
+    resp = {"status": status, "req_id": req_id}
+    resp.update(fields)
+    return resp
+
+
 def recv_json(conn, key: bytes):
     """
     Receive an encrypted line and decrypt it to a dictionary.
     """
-    line = recv_line(conn)
-    if line is None:
+    try:
+        line = recv_line(conn)
+        if line is None:
+            return None
+        obj = json.loads(decrypt_message(key, line))
+        if not isinstance(obj, dict):
+            log.warning("[SERVER] rejected non-object request")
+            return None
+        return obj
+    except Exception as e:
+        log.warning(f"[SERVER] rejected malformed encrypted request: {e}")
         return None
-    return json.loads(decrypt_message(key, line))
 
 
 def perform_handshake(conn):
@@ -214,8 +239,8 @@ def perform_handshake(conn):
         log.info("[SERVER] handshake complete, encrypted session established")
         return session_key
 
-    except Exception as e:
-        log.error(f"[SERVER] handshake error: {e}")
+    except Exception:
+        log.exception("[SERVER] handshake error")
         return None
 
 
@@ -227,11 +252,21 @@ def check_replay(req: dict) -> bool:
     :param req: the received request dictionary
     :returns: True if request is fresh, False if it should be rejected
     """
+    req_id = req.get("req_id", "")
     nonce = req.get("nonce", "")
-    ts = req.get("ts", 0)
 
-    if not nonce:
+    if not isinstance(req_id, str) or not req_id or len(req_id) > 128:
+        log.warning("[SERVER] request missing valid req_id, rejected")
+        return False
+
+    if not isinstance(nonce, str) or not nonce or len(nonce) > 128:
         log.warning("[SERVER] request missing nonce, rejected")
+        return False
+
+    try:
+        ts = float(req.get("ts", 0))
+    except (TypeError, ValueError):
+        log.warning("[SERVER] request missing valid timestamp, rejected")
         return False
 
     now = time.time()
@@ -280,12 +315,13 @@ def validate_username(username: str) -> bool:
     :param username: the username string to validate
     :returns: True if valid, False otherwise
     """
-    if not username or len(username) > 64:
+    if not isinstance(username, str) or not username or len(username) > 64:
         return False
-    for ch in ['/', '\\', '\x00', '..', '<', '>', ':', '"', '|', '?', '*']:
-        if ch in username:
-            return False
-    return True
+    if username in (".", "..") or ".." in username:
+        return False
+
+    allowed = set(string.ascii_letters + string.digits + "._-")
+    return all(ch in allowed for ch in username)
 
 
 def safe_path(username: str, filename: str):
@@ -297,10 +333,20 @@ def safe_path(username: str, filename: str):
     :param filename: the requested filename
     :returns: resolved safe path string, or None if path traversal detected
     """
+    if not isinstance(filename, str) or not filename or len(filename) > 255:
+        log.warning(f"[SERVER] invalid filename by {username}: {filename}")
+        return None
+    if filename in (".", "..") or "\x00" in filename or "/" in filename or "\\" in filename:
+        log.warning(f"[SERVER] invalid filename by {username}: {filename}")
+        return None
+
     user_dir = os.path.realpath(os.path.join(STORAGE_DIR, username))
     full_path = os.path.realpath(os.path.join(user_dir, filename))
     if not full_path.startswith(user_dir + os.sep) and full_path != user_dir:
         log.warning(f"[SERVER] path traversal attempt by {username}: {filename}")
+        return None
+    if os.path.isdir(full_path):
+        log.warning(f"[SERVER] directory path rejected for {username}: {filename}")
         return None
     return full_path
 
@@ -313,7 +359,10 @@ def require_auth(req):
     :returns: username corresponding to token in request, or None
     """
     token = req.get("token", "")
-    return SESSIONS.get(token)
+    if not isinstance(token, str):
+        return None
+    with SESSIONS_LOCK:
+        return SESSIONS.get(token)
 
 
 def add_to_sessions(token, username):
@@ -324,10 +373,11 @@ def add_to_sessions(token, username):
     :param username: a username
     :returns: True on success, else False
     """
-    if len(SESSIONS) < CLIENT_LIMIT:
-        SESSIONS[token] = username
-        return True
-    return False
+    with SESSIONS_LOCK:
+        if len(SESSIONS) < CLIENT_LIMIT:
+            SESSIONS[token] = username
+            return True
+        return False
 
 
 def handle_create(conn, key, req, client_ip):
@@ -335,37 +385,49 @@ def handle_create(conn, key, req, client_ip):
     Handle the CREATE command.
     """
     if not check_rate_limit(client_ip):
-        send_json(conn, key, {"status": "error", "message": "too many requests, try again later"})
+        send_json(conn, key, make_response(req, "error", message="too many requests, try again later"))
         return
 
-    username = req.get("username", "").strip()
-    password = req.get("password", "").strip()
+    raw_username = req.get("username", "")
+    raw_password = req.get("password", "")
+    if not isinstance(raw_username, str) or not isinstance(raw_password, str):
+        send_json(conn, key, make_response(req, "error", message="missing username or password"))
+        return
+
+    username = raw_username.strip()
+    password = raw_password.strip()
 
     if not username or not password:
-        send_json(conn, key, {"status": "error", "message": "missing username or password"})
+        send_json(conn, key, make_response(req, "error", message="missing username or password"))
         return
 
     if not validate_username(username):
         log.warning(f"[SERVER] invalid username attempt from {client_ip}: {username}")
-        send_json(conn, key, {"status": "error", "message": "invalid username"})
+        send_json(conn, key, make_response(req, "error", message="invalid username"))
         return
 
-    if username in USERS:
-        send_json(conn, key, {"status": "error", "message": "user already exists"})
-        return
+    with USERS_LOCK:
+        if username in USERS:
+            send_json(conn, key, make_response(req, "error", message="user already exists"))
+            return
 
-    # hash the password before storing it
-    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        try:
+            # hash the password before storing it
+            hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-    user_dir = os.path.join(STORAGE_DIR, username)
-    os.makedirs(user_dir, exist_ok=True)
-    USERS[username] = hashed
+            user_dir = os.path.join(STORAGE_DIR, username)
+            os.makedirs(user_dir, exist_ok=True)
+            USERS[username] = hashed
 
-    with open("users.json", "w", encoding="utf-8") as f:
-        json.dump(USERS, f, indent=4)
+            with open("users.json", "w", encoding="utf-8") as f:
+                json.dump(USERS, f, indent=4)
+        except Exception:
+            log.exception(f"[SERVER] account creation failed for {username}")
+            send_json(conn, key, make_response(req, "error", message="account creation failed"))
+            return
 
     log.info(f"[SERVER] account created: {username} from {client_ip}")
-    send_json(conn, key, {"status": "ok", "message": "account created", "req_id": req.get("req_id", "")})
+    send_json(conn, key, make_response(req, "ok", message="account created"))
 
 
 def handle_auth(conn, key, req, client_ip):
@@ -373,28 +435,36 @@ def handle_auth(conn, key, req, client_ip):
     Handle the AUTH command.
     """
     if not check_rate_limit(client_ip):
-        send_json(conn, key, {"status": "error", "message": "too many requests, try again later"})
+        send_json(conn, key, make_response(req, "error", message="too many requests, try again later"))
         return
 
     username = req.get("username", "")
     password = req.get("password", "")
+    stored = None
 
-    if username in USERS:
-        stored = USERS[username].encode("utf-8")
+    if isinstance(username, str) and isinstance(password, str):
+        with USERS_LOCK:
+            stored_hash = USERS.get(username)
+        if stored_hash:
+            stored = stored_hash.encode("utf-8")
+        else:
+            stored = None
+
+    if isinstance(username, str) and isinstance(password, str) and stored:
         try:
             if bcrypt.checkpw(password.encode("utf-8"), stored):
                 token = str(uuid.uuid4())
                 if add_to_sessions(token, username):
                     log.info(f"[SERVER] auth success: {username} from {client_ip}")
-                    send_json(conn, key, {"status": "ok", "token": token, "req_id": req.get("req_id", "")})
+                    send_json(conn, key, make_response(req, "ok", token=token))
                 else:
-                    send_json(conn, key, {"status": "error", "message": "server overload"})
+                    send_json(conn, key, make_response(req, "error", message="server overload"))
                 return
         except Exception:
             pass
 
     log.warning(f"[SERVER] auth failure: {username} from {client_ip}")
-    send_json(conn, key, {"status": "error", "message": "invalid credentials"})
+    send_json(conn, key, make_response(req, "error", message="invalid credentials"))
 
 
 def handle_list(conn, key, req):
@@ -403,7 +473,7 @@ def handle_list(conn, key, req):
     """
     username = require_auth(req)
     if not username:
-        send_json(conn, key, {"status": "error", "message": "unauthorized"})
+        send_json(conn, key, make_response(req, "error", message="unauthorized"))
         return
 
     user_dir = os.path.join(STORAGE_DIR, username)
@@ -423,9 +493,10 @@ def handle_list(conn, key, req):
                 "digest": digest,
             })
         log.info(f"[SERVER] list by {username}")
-        send_json(conn, key, {"status": "ok", "files": files, "req_id": req.get("req_id", "")})
-    except Exception as e:
-        send_json(conn, key, {"status": "error", "message": str(e)})
+        send_json(conn, key, make_response(req, "ok", files=files))
+    except Exception:
+        log.exception(f"[SERVER] list failed for {username}")
+        send_json(conn, key, make_response(req, "error", message="list failed"))
 
 
 def handle_upload(conn, key, req):
@@ -434,15 +505,19 @@ def handle_upload(conn, key, req):
     """
     username = require_auth(req)
     if not username:
-        send_json(conn, key, {"status": "error", "message": "unauthorized"})
+        send_json(conn, key, make_response(req, "error", message="unauthorized"))
         return
 
     filename = req.get("filename", "")
     content = req.get("content", "")
 
+    if not isinstance(content, str):
+        send_json(conn, key, make_response(req, "error", message="invalid file content"))
+        return
+
     path = safe_path(username, filename)
     if not path:
-        send_json(conn, key, {"status": "error", "message": "invalid filename"})
+        send_json(conn, key, make_response(req, "error", message="invalid filename"))
         return
 
     try:
@@ -451,15 +526,13 @@ def handle_upload(conn, key, req):
         ts = os.path.getmtime(path)
         sha256_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         log.info(f"[SERVER] upload: {filename} by {username}")
-        send_json(conn, key, {
-            "status": "ok",
-            "message": f"upload complete for {username}",
-            "ts": ts,
-            "sha256": sha256_digest,
-            "req_id": req.get("req_id", ""),
-        })
-    except Exception as e:
-        send_json(conn, key, {"status": "error", "message": str(e)})
+        send_json(conn, key, make_response(req, "ok",
+                                           message=f"upload complete for {username}",
+                                           ts=ts,
+                                           sha256=sha256_digest))
+    except Exception:
+        log.exception(f"[SERVER] upload failed for {username}")
+        send_json(conn, key, make_response(req, "error", message="upload failed"))
 
 
 def handle_download(conn, key, req):
@@ -468,13 +541,13 @@ def handle_download(conn, key, req):
     """
     username = require_auth(req)
     if not username:
-        send_json(conn, key, {"status": "error", "message": "unauthorized"})
+        send_json(conn, key, make_response(req, "error", message="unauthorized"))
         return
 
     filename = req.get("filename", "")
     path = safe_path(username, filename)
     if not path:
-        send_json(conn, key, {"status": "error", "message": "invalid filename"})
+        send_json(conn, key, make_response(req, "error", message="invalid filename"))
         return
 
     try:
@@ -483,16 +556,14 @@ def handle_download(conn, key, req):
         modified_ts = os.path.getmtime(path)
         sha256_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         log.info(f"[SERVER] download: {filename} by {username}")
-        send_json(conn, key, {
-            "status": "ok",
-            "filename": filename,
-            "content": content,
-            "modified_ts": modified_ts,
-            "sha256": sha256_digest,
-            "req_id": req.get("req_id", ""),
-        })
-    except Exception as e:
-        send_json(conn, key, {"status": "error", "message": str(e)})
+        send_json(conn, key, make_response(req, "ok",
+                                           filename=filename,
+                                           content=content,
+                                           modified_ts=modified_ts,
+                                           sha256=sha256_digest))
+    except Exception:
+        log.exception(f"[SERVER] download failed for {username}")
+        send_json(conn, key, make_response(req, "error", message="download failed"))
 
 
 def handle_logout(conn, key, req):
@@ -500,15 +571,20 @@ def handle_logout(conn, key, req):
     Handle the LOGOUT command.
     """
     token = req.get("token", "")
-    username = SESSIONS.get(token)
+    if not isinstance(token, str):
+        username = None
+    else:
+        with SESSIONS_LOCK:
+            username = SESSIONS.get(token)
     if not username:
-        send_json(conn, key, {"status": "error", "message": "unauthorized"})
+        send_json(conn, key, make_response(req, "error", message="unauthorized"))
         return
 
     # remove the token so it cannot be reused after logout
-    del SESSIONS[token]
+    with SESSIONS_LOCK:
+        SESSIONS.pop(token, None)
     log.info(f"[SERVER] logout: {username}")
-    send_json(conn, key, {"status": "ok", "message": f"{username} logged out", "req_id": req.get("req_id", "")})
+    send_json(conn, key, make_response(req, "ok", message=f"{username} logged out"))
 
 
 def dispatch(conn, key, req, client_ip):
@@ -525,7 +601,7 @@ def dispatch(conn, key, req, client_ip):
 
     # reject replayed or stale requests before doing anything else
     if not check_replay(req):
-        send_json(conn, key, {"status": "error", "message": "request rejected", "req_id": req_id})
+        send_json(conn, key, make_response(req, "error", message="request rejected"))
         return
 
     # pass req_id into req so handlers can include it in responses
@@ -544,7 +620,7 @@ def dispatch(conn, key, req, client_ip):
     elif action == "LOGOUT":
         handle_logout(conn, key, req)
     else:
-        send_json(conn, key, {"status": "error", "message": "unknown action", "req_id": req_id})
+        send_json(conn, key, make_response(req, "error", message="unknown action"))
 
 
 def handle_client(conn, addr):
@@ -558,13 +634,16 @@ def handle_client(conn, addr):
     client_ip = addr[0]
     log.info(f"[SERVER] connection from {addr}")
     try:
+        conn.settimeout(15.0)
+
         # establish encrypted session before processing any commands
         session_key = perform_handshake(conn)
         if not session_key:
             log.warning(f"[SERVER] handshake failed with {addr}")
             conn.close()
-            connection_semaphore.release()
             return
+
+        conn.settimeout(300.0)
 
         while True:
             req = recv_json(conn, session_key)
@@ -573,8 +652,10 @@ def handle_client(conn, addr):
             log.info(f"[SERVER] recv from {addr}: action={req.get('action', '?')}")
             dispatch(conn, session_key, req, client_ip)
 
-    except Exception as e:
-        log.error(f"[SERVER] error with {addr}: {e}")
+    except socket.timeout:
+        log.warning(f"[SERVER] timed out connection from {addr}")
+    except Exception:
+        log.exception(f"[SERVER] error with {addr}")
     finally:
         conn.close()
         log.info(f"[SERVER] disconnected {addr}")

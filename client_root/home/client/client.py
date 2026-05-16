@@ -17,13 +17,17 @@ import os
 import base64
 import uuid
 import time
+import ipaddress
+from datetime import datetime, timezone
 
+from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.x509 import load_pem_x509_certificate
+from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives.asymmetric import padding as apad
 from cryptography.hazmat.primitives import hashes as hsh
 from cryptography.exceptions import InvalidSignature
@@ -93,17 +97,42 @@ def send_recv(sock, key: bytes, obj: dict) -> dict:
     :returns: response from server as dictionary object
     """
     # add fields needed for replay protection and response verification
-    obj["nonce"] = str(uuid.uuid4())
-    obj["ts"] = time.time()
-    obj["req_id"] = str(uuid.uuid4())
+    req = dict(obj)
+    req["nonce"] = str(uuid.uuid4())
+    req["ts"] = time.time()
+    req["req_id"] = str(uuid.uuid4())
 
-    sock.sendall(encrypt_message(key, json.dumps(obj)) + b"\n")
+    sock.sendall(encrypt_message(key, json.dumps(req)) + b"\n")
 
     line = recv_line(sock)
-    return json.loads(decrypt_message(key, line))
+    resp = json.loads(decrypt_message(key, line))
+    if not isinstance(resp, dict):
+        raise ValueError("server response was not a JSON object")
+    if resp.get("req_id") != req["req_id"]:
+        raise ValueError("response request ID mismatch -- possible replay or injection")
+    return resp
 
 
-def verify_server_certificate(cert_pem: bytes):
+def certificate_matches_host(server_cert, expected_host: str) -> bool:
+    """
+    Confirm the certificate identity matches the server we intended to reach.
+    """
+    try:
+        expected_ip = ipaddress.ip_address(expected_host)
+    except ValueError:
+        expected_ip = None
+
+    try:
+        san = server_cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        if expected_ip is not None:
+            return expected_ip in san.get_values_for_type(x509.IPAddress)
+        return expected_host.lower() in [name.lower() for name in san.get_values_for_type(x509.DNSName)]
+    except x509.ExtensionNotFound:
+        attrs = server_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        return any(attr.value == expected_host for attr in attrs)
+
+
+def verify_server_certificate(cert_pem: bytes, expected_host: str):
     """
     Verify the server certificate against our trusted CA certificate.
     Returns the server certificate public key if valid.
@@ -124,6 +153,20 @@ def verify_server_certificate(cert_pem: bytes):
         apad.PKCS1v15(),
         hsh.SHA256()
     )
+
+    now = datetime.now(timezone.utc)
+    if hasattr(server_cert, "not_valid_before_utc"):
+        not_before = server_cert.not_valid_before_utc
+        not_after = server_cert.not_valid_after_utc
+    else:
+        not_before = server_cert.not_valid_before.replace(tzinfo=timezone.utc)
+        not_after = server_cert.not_valid_after.replace(tzinfo=timezone.utc)
+
+    if now < not_before or now > not_after:
+        raise ValueError("server certificate is expired or not yet valid")
+
+    if not certificate_matches_host(server_cert, expected_host):
+        raise ValueError("server certificate identity does not match expected host")
 
     print("[CLIENT] server certificate verified")
     return server_cert.public_key()
@@ -148,7 +191,7 @@ def perform_handshake(sock):
     if not cert_pem:
         raise ValueError("server did not provide a certificate")
 
-    server_cert_pub = verify_server_certificate(cert_pem)
+    server_cert_pub = verify_server_certificate(cert_pem, SERVER_HOST)
 
     # generate client ECDH keypair and send the public key to server
     client_priv = X25519PrivateKey.generate()
@@ -190,6 +233,7 @@ def main():
     token = None
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(15.0)
 
         sock.connect((SERVER_HOST, SERVER_PORT))
         print(f"[CLIENT] connected to server at {SERVER_HOST}:{SERVER_PORT}")
@@ -200,6 +244,8 @@ def main():
         except Exception as e:
             print(f"[CLIENT] could not establish secure connection: {e}")
             return
+
+        sock.settimeout(300.0)
 
         while True:
             print("\nChoose:")

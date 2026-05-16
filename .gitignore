@@ -1,0 +1,30 @@
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Private keys and generated sensitive crypto material
+*.key
+*_key.pem
+*_private.pem
+*_private_key.pem
+ca_key.pem
+ca_private_key.pem
+server_key.pem
+server_private_key.pem
+tunnelserver_pubpri.pem
+
+# Certificate generation artifacts
+*.srl
+
+# Runtime artifacts
+.DS_Store
+*.out
+*.err
+*.log
+server_run.out
+server_run.err
+
+# Python artifacts
+__pycache__/
+*.pyc
