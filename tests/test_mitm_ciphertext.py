@@ -31,35 +31,33 @@ def send_recv_with_capture(client, sock, key, obj):
     return raw_out, raw_in, resp
 
 
-def main():
+def assert_post_handshake_messages_are_ciphertext(client, sock, key):
     test_file = SERVER_DIR / "server_storage" / "alice" / "test.txt"
     known_content = test_file.read_text(encoding="utf-8", errors="ignore").strip()
 
-    client, sock, key = connect_secure()
     captures = []
-    try:
-        raw_out, raw_in, auth = send_recv_with_capture(client, sock, key, {
-            "action": "AUTH",
-            "username": "alice",
-            "password": "password123",
-        })
+    raw_out, raw_in, auth = send_recv_with_capture(client, sock, key, {
+        "action": "AUTH",
+        "username": "alice",
+        "password": "password123",
+    })
+    captures.extend([raw_out, raw_in])
+    assert_condition(auth.get("status") == "ok", f"AUTH failed: {auth}")
+    token = auth["token"]
+
+    for request in [
+        {"action": "LIST", "token": token},
+        {"action": "DOWNLOAD", "token": token, "filename": "test.txt"},
+        {"action": "LOGOUT", "token": token},
+    ]:
+        raw_out, raw_in, resp = send_recv_with_capture(client, sock, key, request)
         captures.extend([raw_out, raw_in])
-        assert_condition(auth.get("status") == "ok", f"AUTH failed: {auth}")
-        token = auth["token"]
+        assert_condition(resp.get("status") == "ok", f"{request['action']} failed: {resp}")
 
-        for request in [
-            {"action": "LIST", "token": token},
-            {"action": "DOWNLOAD", "token": token, "filename": "test.txt"},
-            {"action": "LOGOUT", "token": token},
-        ]:
-            raw_out, raw_in, resp = send_recv_with_capture(client, sock, key, request)
-            captures.extend([raw_out, raw_in])
-            assert_condition(resp.get("status") == "ok", f"{request['action']} failed: {resp}")
-    finally:
-        sock.close()
-
+    decoded_captures = []
     for line in captures:
         decoded = base64.b64decode(line.strip(), validate=True)
+        decoded_captures.append(decoded)
         assert_condition(len(decoded) > 28, "encrypted message too short to contain nonce, tag, and ciphertext")
 
     sensitive_strings = [
@@ -79,9 +77,22 @@ def main():
     if known_content:
         sensitive_strings.append(known_content)
 
-    combined = b"".join(captures)
+    combined = b"".join(decoded_captures)
     exposed = [s for s in sensitive_strings if s.encode("utf-8") in combined]
     assert_condition(not exposed, f"plaintext appeared in post-handshake capture: {exposed}")
+
+
+def test_mitm_sees_only_ciphertext_after_handshake(secure_connection):
+    client, sock, key = secure_connection
+    assert_post_handshake_messages_are_ciphertext(client, sock, key)
+
+
+def main():
+    client, sock, key = connect_secure()
+    try:
+        assert_post_handshake_messages_are_ciphertext(client, sock, key)
+    finally:
+        sock.close()
 
     print("PASS T-01 MITM ciphertext: post-handshake capture contains no sensitive plaintext")
 

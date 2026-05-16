@@ -35,21 +35,22 @@ cd ~/
 python3 server.py
 ```
 
-Run the tests from the repository root in another terminal. The tests use the
-client namespace so traffic follows the assignment network path:
+Run the pytest suite from the repository root in another terminal. The tests use
+the client namespace so traffic follows the assignment network path:
 
 ```bash
-sudo ip netns exec ns_client python3 tests/test_mitm_ciphertext.py
-sudo ip netns exec ns_client python3 tests/test_path_traversal.py
-sudo ip netns exec ns_client python3 tests/test_logout_token_reuse.py
+sudo ip netns exec ns_client python3 -m pytest tests/
 ```
+
+The individual test files can also be run directly with `python3` if pytest is
+not available.
 
 ## T-01 MITM Sees Only Ciphertext After Handshake
 
 Command:
 
 ```bash
-sudo ip netns exec ns_client python3 tests/test_mitm_ciphertext.py
+sudo ip netns exec ns_client python3 -m pytest tests/test_mitm_ciphertext.py
 ```
 
 Purpose:
@@ -75,7 +76,7 @@ secure channel is established are opaque to a network attacker.
 Command:
 
 ```bash
-sudo ip netns exec ns_client python3 tests/test_path_traversal.py
+sudo ip netns exec ns_client python3 -m pytest tests/test_path_traversal.py
 ```
 
 Purpose:
@@ -95,7 +96,7 @@ PASS T-02 path traversal: ../bob/letter.txt rejected and Bob's file unchanged
 Command:
 
 ```bash
-sudo ip netns exec ns_client python3 tests/test_logout_token_reuse.py
+sudo ip netns exec ns_client python3 -m pytest tests/test_logout_token_reuse.py
 ```
 
 Purpose:
