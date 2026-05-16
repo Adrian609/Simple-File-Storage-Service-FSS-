@@ -36,11 +36,12 @@ from cryptography.hazmat.primitives import hashes as hsh
 from cryptography.exceptions import InvalidSignature
 
 # Class namespace server IP from setup_net; not a secret and must match cert SAN.
-HOST = "10.0.8.2"
+HOST = "127.0.0.1"
 PORT = 9001
 STORAGE_DIR = "server_storage"
 
 SESSIONS = {}
+SESSION_TTL_SECONDS = 1800
 CLIENT_LIMIT = 512  # DO NOT CHANGE: only enough resources to allow 1024 clients
 
 MAX_MESSAGE_BYTES = 10 * 1024 * 1024  # reject messages larger than 10MB
@@ -121,7 +122,9 @@ def decrypt_message(key: bytes, data: str) -> str:
     """
     Decrypt a base64-encoded AES-GCM message. Raises on tamper detection.
     """
-    raw = base64.b64decode(data)
+    raw = base64.b64decode(data, validate=True)
+    if len(raw) < 12 + 16:
+        raise ValueError("encrypted message too short")
     nonce, ct = raw[:12], raw[12:]
     aesgcm = AESGCM(key)
     return aesgcm.decrypt(nonce, ct, None).decode("utf-8")
