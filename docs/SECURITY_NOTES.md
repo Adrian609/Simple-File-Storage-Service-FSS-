@@ -73,9 +73,9 @@ demo server key as already exposed.
 
 `.env.example` is a safe template containing class/demo host, port, certificate
 filenames, storage directory, log filename, and protocol limit values. It does
-not contain secrets. The source currently hardcodes the assignment server port
-as `9001`; `SERVER_PORT=5000` in the template is a safe demo placeholder for
-local wrappers or future environment-variable support.
+not contain secrets. The class/demo server listens on port `9001`, and
+`.env.example` matches that default. Change the port only if you also update
+both the client and server configuration.
 
 You may copy `.env.example` to `.env` for local wrappers or experiments, but the
 current Python scripts do not load `.env` automatically. Real `.env` files are

@@ -104,8 +104,9 @@ rejects responses with a missing or mismatched `req_id`.
 `.env.example` documents safe class-demo configuration values. The current
 client, server, and MITM scripts keep these values as constants, so copying
 `.env.example` to `.env` is optional unless you add a local wrapper that loads
-environment variables. The assignment namespace code currently uses port `9001`
-even though the template includes `SERVER_PORT=5000` as a safe demo placeholder.
+environment variables. The class/demo server listens on port `9001`, and
+`.env.example` matches that default. Change the port only if you also update
+both the client and server configuration.
 
 `.env` and `.env.*` are ignored and should not be committed. Public
 certificates may be committed for the assignment, but private keys, production
