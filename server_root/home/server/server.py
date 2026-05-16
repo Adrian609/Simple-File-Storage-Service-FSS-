@@ -35,6 +35,7 @@ from cryptography.hazmat.primitives.asymmetric import padding as apad
 from cryptography.hazmat.primitives import hashes as hsh
 from cryptography.exceptions import InvalidSignature
 
+# Class namespace server IP from setup_net; not a secret and must match cert SAN.
 HOST = "10.0.8.2"
 PORT = 9001
 STORAGE_DIR = "server_storage"
@@ -430,6 +431,47 @@ def handle_create(conn, key, req, client_ip):
     send_json(conn, key, make_response(req, "ok", message="account created"))
 
 
+def get_stored_password_hash(username):
+    """
+    Return a stored bcrypt hash for a valid username, or None.
+    """
+    if not isinstance(username, str):
+        return None
+
+    with USERS_LOCK:
+        stored_hash = USERS.get(username)
+
+    if not isinstance(stored_hash, str):
+        return None
+    return stored_hash.encode("utf-8")
+
+
+def password_matches(password, stored_hash):
+    """
+    Check a submitted password against a stored bcrypt hash.
+    """
+    if not isinstance(password, str) or stored_hash is None:
+        return False
+
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), stored_hash)
+    except Exception:
+        return False
+
+
+def send_auth_success(conn, key, req, username, client_ip):
+    """
+    Create a session token and send the successful AUTH response.
+    """
+    token = str(uuid.uuid4())
+    if not add_to_sessions(token, username):
+        send_json(conn, key, make_response(req, "error", message="server overload"))
+        return
+
+    log.info(f"[SERVER] auth success: {username} from {client_ip}")
+    send_json(conn, key, make_response(req, "ok", token=token))
+
+
 def handle_auth(conn, key, req, client_ip):
     """
     Handle the AUTH command.
@@ -440,28 +482,10 @@ def handle_auth(conn, key, req, client_ip):
 
     username = req.get("username", "")
     password = req.get("password", "")
-    stored = None
 
-    if isinstance(username, str) and isinstance(password, str):
-        with USERS_LOCK:
-            stored_hash = USERS.get(username)
-        if stored_hash:
-            stored = stored_hash.encode("utf-8")
-        else:
-            stored = None
-
-    if isinstance(username, str) and isinstance(password, str) and stored:
-        try:
-            if bcrypt.checkpw(password.encode("utf-8"), stored):
-                token = str(uuid.uuid4())
-                if add_to_sessions(token, username):
-                    log.info(f"[SERVER] auth success: {username} from {client_ip}")
-                    send_json(conn, key, make_response(req, "ok", token=token))
-                else:
-                    send_json(conn, key, make_response(req, "error", message="server overload"))
-                return
-        except Exception:
-            pass
+    if password_matches(password, get_stored_password_hash(username)):
+        send_auth_success(conn, key, req, username, client_ip)
+        return
 
     log.warning(f"[SERVER] auth failure: {username} from {client_ip}")
     send_json(conn, key, make_response(req, "error", message="invalid credentials"))

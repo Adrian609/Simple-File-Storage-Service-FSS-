@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric import padding as apad
 from cryptography.hazmat.primitives import hashes as hsh
 from cryptography.exceptions import InvalidSignature
 
+# Class namespace server IP from setup_net; not a secret and must match cert SAN.
 SERVER_HOST = "10.0.8.2"
 SERVER_PORT = 9001
 

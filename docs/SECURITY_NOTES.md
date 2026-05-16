@@ -27,6 +27,11 @@ certificate, then removes it. The duplicate generated `certs/server_key.pem`
 and OpenSSL serial file are also removed after the runtime demo files are
 copied into place.
 
+`server_root/home/server/users.json` contains bcrypt hashes for the fixed class
+demo accounts listed in `README.md`. These are included so the submission runs
+without an interactive setup step. They are not production credentials and must
+be replaced or regenerated before any real deployment.
+
 To regenerate all class demo certificate material:
 
 ```bash
