@@ -11,7 +11,7 @@ private_key_pattern='BEGIN (RSA |EC |OPENSSH )?PRIVATE'
 private_key_pattern="${private_key_pattern} KEY"
 matches="$(grep -RIl --exclude-dir=.git --exclude='*.zip' -E "$private_key_pattern" . || true)"
 
-if [ -z "$matches" ]; then
+if [[ -z "$matches" ]]; then
   echo "  none"
 else
   printf '%s\n' "$matches" | sed 's#^\./#  #'
